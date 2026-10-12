@@ -1,0 +1,259 @@
+<script setup>
+import { ref, computed } from "vue";
+import { Plus, X, Trash2, Check, LoaderCircle, Layers } from "lucide-vue-next";
+import { api } from "../api";
+const props = defineProps({ tableId: Number, boxes: Array, litters: Array });
+const emit = defineEmits(["close", "saved"]);
+const boxId = ref(props.boxes.find((b) => !b.archived)?.id || ""),
+  notes = ref(""),
+  busy = ref(false),
+  error = ref("");
+const now = new Date();
+const occurredAt = ref(
+  new Date(now.getTime() - now.getTimezoneOffset() * 60000)
+    .toISOString()
+    .slice(0, 16),
+);
+let sequence = 0;
+const newItem = () => ({
+  key: ++sequence,
+  kind: "urine",
+  grams: "",
+  diameter_cm: "",
+  looseness: 2,
+  moisture: 3,
+  shape: "formed",
+  size: 3,
+  blood: false,
+});
+const items = ref([newItem()]);
+const selected = computed(() =>
+  props.boxes.find((b) => b.id === Number(boxId.value)),
+);
+const litter = computed(() =>
+  props.litters.find((l) => l.id === selected.value?.litter_id),
+);
+const num = (v) => (v === "" ? null : Number(v));
+async function save() {
+  busy.value = true;
+  error.value = "";
+  try {
+    const records = items.value.map((r) => ({
+      mode: "shared",
+      kind: r.kind,
+      cat_id: null,
+      box_id: Number(boxId.value),
+      occurred_at: new Date(occurredAt.value).toISOString(),
+      count: 1,
+      grams: num(r.grams),
+      diameter_cm: r.kind === "urine" ? num(r.diameter_cm) : null,
+      looseness: r.kind === "urine" ? Number(r.looseness) : null,
+      moisture: r.kind === "stool" ? Number(r.moisture) : null,
+      shape: r.kind === "stool" ? r.shape : "",
+      size: r.kind === "stool" ? Number(r.size) : null,
+      body_weight_kg: null,
+      blood: r.blood,
+      straining: false,
+      no_output: false,
+      notes: notes.value,
+    }));
+    await api(`/tables/${props.tableId}/batches`, "POST", { items: records });
+    emit("saved");
+  } catch (e) {
+    error.value = e.message;
+  } finally {
+    busy.value = false;
+  }
+}
+</script>
+<template>
+  <div class="modal-backdrop" @click.self="!busy && emit('close')">
+    <section
+      class="modal collection-modal"
+      role="dialog"
+      aria-modal="true"
+      aria-label="共享盆逐块采集"
+    >
+      <div class="modal-heading">
+        <div>
+          <span class="eyebrow">SHARED BOX · COLLECT FIRST</span>
+          <h2>共享盆，记下每一块</h2>
+        </div>
+        <button
+          class="icon-btn"
+          :disabled="busy"
+          @click="emit('close')"
+          aria-label="关闭采集"
+        >
+          <X :size="20" />
+        </button>
+      </div>
+      <form class="modal-form" @submit.prevent="save">
+        <div class="form-grid">
+          <label
+            >采集猫砂盆<select v-model.number="boxId" required>
+              <option disabled value="">先配置猫砂盆</option>
+              <option
+                v-for="b in boxes.filter((b) => !b.archived)"
+                :key="b.id"
+                :value="b.id"
+              >
+                {{ b.name }}
+              </option>
+            </select></label
+          ><label
+            >采集时间<input type="datetime-local" v-model="occurredAt" required
+          /></label>
+        </div>
+        <div class="form-note">
+          <Layers :size="17" />
+          <p>
+            不需要判断归属。一行记录一个完整尿团或一块完整大便；正常样本与异常样本一起用于差异分析。碎片请先按同一块合并称量。
+          </p>
+        </div>
+        <p class="form-hint">
+          {{ litter?.name || "未选择猫砂" }} · 等待
+          {{ litter?.wait_minutes ?? "—" }} 分钟称量 · 本次
+          {{ items.length }} 块
+        </p>
+        <article
+          class="collection-item"
+          v-for="(item, index) in items"
+          :key="item.key"
+        >
+          <div class="collection-item-heading">
+            <strong>第 {{ index + 1 }} 块</strong
+            ><select
+              v-model="item.kind"
+              :aria-label="'第' + (index + 1) + '块类型'"
+            >
+              <option value="urine">尿团</option>
+              <option value="stool">大便</option></select
+            ><button
+              type="button"
+              class="icon-btn danger"
+              v-if="items.length > 1"
+              @click="items.splice(index, 1)"
+              aria-label="移除采集项"
+            >
+              <Trash2 :size="15" />
+            </button>
+          </div>
+          <div class="form-grid">
+            <label
+              >重量（g）<input
+                type="number"
+                min="0.1"
+                max="2000"
+                step="0.1"
+                v-model="item.grams"
+                required
+                placeholder="逐块称重" /></label
+            ><template v-if="item.kind === 'urine'"
+              ><label
+                >最大直径（cm，可选）<input
+                  type="number"
+                  min="0.1"
+                  max="50"
+                  step="0.1"
+                  v-model="item.diameter_cm" /></label
+              ><label
+                >松散度<select v-model.number="item.looseness">
+                  <option
+                    v-for="(text, n) in [
+                      '紧实',
+                      '较紧实',
+                      '适中',
+                      '偏松散',
+                      '易碎散',
+                    ]"
+                    :key="n"
+                    :value="n + 1"
+                  >
+                    {{ n + 1 }} · {{ text }}
+                  </option>
+                </select></label
+              ></template
+            ><template v-else
+              ><label
+                >干湿度<select v-model.number="item.moisture">
+                  <option
+                    v-for="(text, n) in [
+                      '干硬',
+                      '偏干',
+                      '适中',
+                      '偏湿',
+                      '稀水',
+                    ]"
+                    :key="n"
+                    :value="n + 1"
+                  >
+                    {{ n + 1 }} · {{ text }}
+                  </option>
+                </select></label
+              ><label
+                >形态<select v-model="item.shape">
+                  <option value="pellet">颗粒状</option>
+                  <option value="formed">成形条状</option>
+                  <option value="soft">软条状</option>
+                  <option value="paste">糊状</option>
+                  <option value="watery">水样</option>
+                </select></label
+              ><label
+                >大小<select v-model.number="item.size">
+                  <option
+                    v-for="(text, n) in [
+                      '很小',
+                      '偏小',
+                      '中等',
+                      '偏大',
+                      '很大',
+                    ]"
+                    :key="n"
+                    :value="n + 1"
+                  >
+                    {{ n + 1 }} · {{ text }}
+                  </option>
+                </select></label
+              ></template
+            >
+          </div>
+          <label class="check-label"
+            ><input type="checkbox" v-model="item.blood" />这块发现血迹</label
+          >
+        </article>
+        <button
+          type="button"
+          class="btn secondary add-item"
+          :disabled="items.length >= 30"
+          @click="items.push(newItem())"
+        >
+          <Plus :size="16" />再添加一块（最多30块）</button
+        ><label
+          >本次采集备注<textarea
+            v-model="notes"
+            rows="2"
+            maxlength="500"
+            placeholder="例如：今日第一次清理，共发现2团尿、1块大便"
+          />
+        </label>
+        <div v-if="error" class="error" role="alert">{{ error }}</div>
+        <div class="modal-footer">
+          <button
+            type="button"
+            class="btn secondary"
+            :disabled="busy"
+            @click="emit('close')"
+          >
+            取消</button
+          ><button class="btn primary" :disabled="busy || !selected">
+            <LoaderCircle v-if="busy" :size="16" class="spin" /><Check
+              v-else
+              :size="16"
+            />保存整次采集
+          </button>
+        </div>
+      </form>
+    </section>
+  </div>
+</template>

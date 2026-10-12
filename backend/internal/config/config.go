@@ -6,9 +6,12 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
+	_ "time/tzdata"
 )
 
 type Config struct {
+	TrainingTimezone                                        *time.Location
 	DSN, Secret, Address, Origin, FrontendDir, DemoPassword string
 	BootstrapUsername, BootstrapPassword                    string
 	TrustedProxies                                          []string
@@ -21,6 +24,15 @@ func Load() (Config, error) {
 	c := Config{DSN: os.Getenv("DATABASE_URL"), Secret: os.Getenv("SESSION_SECRET"), Origin: os.Getenv("APP_ORIGIN"), DemoPassword: os.Getenv("DEMO_PASSWORD"), FrontendDir: os.Getenv("FRONTEND_DIR")}
 	c.BootstrapUsername = os.Getenv("BOOTSTRAP_USERNAME")
 	c.BootstrapPassword = os.Getenv("BOOTSTRAP_PASSWORD")
+	zone := os.Getenv("APP_TIMEZONE")
+	if zone == "" {
+		zone = "Asia/Tokyo"
+	}
+	var zoneError error
+	c.TrainingTimezone, zoneError = time.LoadLocation(zone)
+	if zoneError != nil {
+		return c, fmt.Errorf("invalid APP_TIMEZONE")
+	}
 	if value := os.Getenv("TRUSTED_PROXIES"); value != "" {
 		c.TrustedProxies = strings.Split(value, ",")
 	}

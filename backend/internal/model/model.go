@@ -65,6 +65,8 @@ type Record struct {
 	TableID        uint      `json:"table_id" gorm:"index;not null"`
 	CreatorID      uint      `json:"creator_id"`
 	Kind           string    `json:"kind" gorm:"size:10;not null"`
+	Mode           string    `json:"mode" gorm:"size:12;not null;default:observed"`
+	BatchID        string    `json:"batch_id" gorm:"size:32;index"`
 	CatID          *uint     `json:"cat_id" gorm:"index"`
 	BoxID          uint      `json:"box_id" gorm:"index;not null"`
 	OccurredAt     time.Time `json:"occurred_at" gorm:"index;not null"`

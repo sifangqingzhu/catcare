@@ -37,6 +37,8 @@ import {
 import { api } from "./api";
 import CatFace from "./components/CatFace.vue";
 import WeightChart from "./components/WeightChart.vue";
+import SharedCollection from "./components/SharedCollection.vue";
+import BaselineGuide from "./components/BaselineGuide.vue";
 
 const user = ref(null),
   isDemo = ref(false),
@@ -113,16 +115,17 @@ const todayRecords = computed(() =>
         a.cat_id === null,
     ),
   ),
-  unknowns = computed(() =>
-    records.value.filter(
-      (r) => !r.cat_id && Date.now() - new Date(r.occurred_at) < 7 * 86400000,
-    ),
+  poolChecks = computed(() =>
+    (report.value.pools || []).reduce((n, p) => n + p.inspected, 0),
   );
 const filteredRecords = computed(() =>
   records.value
     .filter(
       (r) =>
-        (!selectedCat.value || r.cat_id === selectedCat.value) &&
+        (!selectedCat.value ||
+          r.cat_id === selectedCat.value ||
+          (r.mode === "shared" &&
+            r.eligible_cat_ids.includes(selectedCat.value))) &&
         (recordKind.value === "all" || r.kind === recordKind.value) &&
         (!range.value ||
           Date.now() - new Date(r.occurred_at) <= range.value * 86400000) &&
@@ -177,7 +180,8 @@ const latestWeight = (id) =>
   weights.value
     .filter((w) => w.cat_id === id)
     .sort((a, b) => new Date(b.occurred_at) - new Date(a.occurred_at))[0];
-const catAlert = (id) => report.value.alerts.some((a) => a.cat_id === id);
+const catAlert = (id) =>
+  report.value.alerts.some((a) => a.cat_id === id || a.anchor_cat_id === id);
 const shapes = {
   pellet: "颗粒状",
   formed: "成形条状",
@@ -196,7 +200,22 @@ const materialNames = {
   paper: "纸砂",
   other: "其他",
 };
-const matchFor = (r) => report.value.matches.find((m) => m.record_id === r.id);
+const poolStatus = (r) =>
+  (report.value.pools || [])
+    .flatMap((p) => p.observations)
+    .find((o) => o.record_id === r.id)?.status;
+const statusText = (r) =>
+  r.mode === "baseline"
+    ? "7天隔离基线"
+    : r.mode === "shared"
+      ? {
+          anomaly: "异常样本",
+          within_baseline: "落在正常基线簇",
+          need_baseline: "尚缺完整基线",
+          aggregate_only: "仅汇总，未逐块",
+          insufficient_metrics: "缺少可比较维度",
+        }[poolStatus(r)] || "共享采集"
+      : "个体观察";
 const say = (msg) => {
   toast.value = msg;
   setTimeout(() => (toast.value = ""), 3500);
@@ -314,8 +333,9 @@ function openModal(type, item) {
       notes: "",
     },
     record: {
+      mode: "shared",
       kind: "urine",
-      cat_id: selectedCat.value || "",
+      cat_id: "",
       box_id:
         boxes.value.find(
           (b) =>
@@ -355,6 +375,28 @@ function openModal(type, item) {
       "cat_id",
     ])
       if (form.value[key] === null) form.value[key] = "";
+}
+function startBaseline() {
+  openModal("record");
+  form.value.mode = "baseline";
+  form.value.cat_id = selectedCat.value || eligibleCats.value[0]?.id || "";
+  form.value.count = 1;
+}
+function onModeChange() {
+  if (form.value.mode === "shared") {
+    form.value.cat_id = "";
+  } else if (form.value.mode === "baseline") {
+    form.value.cat_id = eligibleCats.value[0]?.id || "";
+    form.value.count = 1;
+    form.value.no_output = false;
+  }
+}
+async function collected() {
+  modal.value = "";
+  await run(async () => {
+    await refresh();
+    say("共享采集已保存，已更新异常观察");
+  });
 }
 function onBoxChange() {
   form.value.cat_id = "";
@@ -429,6 +471,7 @@ async function save() {
     }
     if (type === "record") {
       body = {
+        mode: f.mode || "observed",
         kind: f.kind,
         cat_id: num(f.cat_id),
         box_id: Number(f.box_id),
@@ -773,13 +816,23 @@ onMounted(async () => {
               }}
             </p>
           </div>
-          <button
+          <div
             v-if="canWrite && ['dashboard', 'records'].includes(tab)"
-            class="btn primary"
-            @click="openModal('record')"
+            class="heading-actions"
           >
-            <Plus :size="18" />记一笔屎尿</button
-          ><button
+            <button
+              class="btn secondary"
+              @click="
+                openModal('record');
+                form.mode = 'observed';
+              "
+            >
+              个体观察</button
+            ><button class="btn primary" @click="openModal('batch')">
+              <Plus :size="18" />共享盆采集
+            </button>
+          </div>
+          <button
             v-if="canWrite && tab === 'weights'"
             class="btn primary"
             @click="openModal('weight')"
@@ -907,9 +960,7 @@ onMounted(async () => {
                 <div>{{ activeCats.length }}<small>只</small></div>
                 <p>
                   在
-                  {{
-                    boxes.filter((b) => !b.archived).length
-                  }}
+                  {{ boxes.filter((b) => !b.archived).length }}
                   个猫砂盆里安心生活
                 </p>
               </article>
@@ -924,7 +975,7 @@ onMounted(async () => {
                       .reduce((sum, r) => sum + r.count, 0)
                   }}<small>团</small>
                 </div>
-                <p>今日已记录 · 包含未知归属</p>
+                <p>今日已记录 · 包含共享采集</p>
               </article>
               <article class="stat-card">
                 <span class="stat-label"
@@ -1022,10 +1073,10 @@ onMounted(async () => {
                   <span class="soft-icon"><Users :size="18" /></span>
                 </div>
                 <div class="shared-number">
-                  <strong>{{ unknowns.length }}</strong
+                  <strong>{{ report.shared_anomalies || 0 }}</strong
                   ><span
-                    >条记录待确认归属<small
-                      >最近7天 · 先记录，再核对</small
+                    >块共享样本出现异常<small
+                      >先检测异常，再缩小排查范围</small
                     ></span
                   >
                 </div>
@@ -1033,8 +1084,8 @@ onMounted(async () => {
                   <span
                     :style="{
                       width:
-                        (report.confirmed /
-                          (report.confirmed + report.unknown || 1)) *
+                        ((poolChecks - (report.shared_anomalies || 0)) /
+                          (poolChecks || 1)) *
                           100 +
                         '%',
                     }"
@@ -1042,14 +1093,17 @@ onMounted(async () => {
                 </div>
                 <div class="meter-label">
                   <span
-                    ><i class="sage-dot" />{{ report.confirmed }} 条已确认</span
+                    ><i class="sage-dot" />近3天检测 {{ poolChecks }} 块</span
                   ><span
-                    ><i class="amber-dot" />{{ report.unknown }} 条未知</span
+                    ><i class="amber-dot" />近7天采集
+                    {{ report.shared_count || 0 }} 块</span
                   >
                 </div>
                 <div class="shared-note">
                   <CircleHelp :size="17" />
-                  <p>特征相似时保留未知；人工确认的记录才会进入单猫基线。</p>
+                  <p>
+                    前7天隔离建立单猫基线，之后共盆逐块采集，无需判断每块归属。
+                  </p>
                 </div>
                 <button
                   class="text-btn"
@@ -1058,10 +1112,17 @@ onMounted(async () => {
                     selectedCat = 0;
                   "
                 >
-                  核对记录<ChevronRight :size="15" />
+                  查看共享样本<ChevronRight :size="15" />
                 </button>
               </section>
             </div>
+            <BaselineGuide
+              :pools="report.pools || []"
+              :cats="cats"
+              :can-write="canWrite"
+              @record="startBaseline"
+              @collect="openModal('batch')"
+            />
             <section class="panel alerts-panel">
               <div class="panel-heading">
                 <h3>
@@ -1069,7 +1130,7 @@ onMounted(async () => {
                     >{{ alerts.length }} 条观察</span
                   >
                 </h3>
-                <span class="subtle">根据近28天个人基线</span>
+                <span class="subtle">7天单猫基线 · 共享池差异分析</span>
               </div>
               <div v-if="!alerts.length" class="quiet-alert">
                 <Check :size="19" /><span
@@ -1092,6 +1153,17 @@ onMounted(async () => {
                     >
                   </h4>
                   <p>{{ a.detail }}</p>
+                  <div v-if="a.suspects?.length" class="suspect-list">
+                    <strong v-if="a.anchor_cat_id"
+                      >优先排查：{{ catName(a.anchor_cat_id) }}</strong
+                    ><strong v-else>已报警，尚不能锁定单猫</strong
+                    ><span
+                      v-for="s in a.suspects"
+                      :key="s.cat_id"
+                      :title="s.reason"
+                      >{{ catName(s.cat_id) }} · 差异支持 {{ s.score }}分</span
+                    ><small>支持分是模型比较分，不是患病概率。</small>
+                  </div>
                 </div>
                 <button
                   v-if="a.record_id"
@@ -1123,7 +1195,7 @@ onMounted(async () => {
                   >
                 </h3>
                 <p v-if="tab === 'records'">
-                  未知归属的记录保留在盆级观察中，不混入单猫统计。
+                  共享采集无需归属；前7天的单猫隔离基线用于检测异常、进行差异定位。
                 </p>
               </div>
               <button
@@ -1169,7 +1241,7 @@ onMounted(async () => {
                 <thead>
                   <tr>
                     <th>记录时间</th>
-                    <th>猫咪 / 归属</th>
+                    <th>采样模式 / 猫咪</th>
                     <th>类型</th>
                     <th>量化观察</th>
                     <th>猫砂盆 / 猫砂</th>
@@ -1198,18 +1270,15 @@ onMounted(async () => {
                           :color="getCat(r.cat_id)?.color"
                         /><span v-else class="unknown-avatar"
                           ><CircleHelp :size="17" /></span
-                        >{{ catName(r.cat_id) }}</span
-                      ><small
-                        v-if="!r.cat_id && matchFor(r)?.candidates.length"
-                        class="match-hint"
-                        :title="matchFor(r).reason"
                         >{{
-                          matchFor(r).status === "review"
-                            ? "建议核对"
-                            : "特征重叠"
-                        }}
-                        · {{ catName(matchFor(r).candidates[0].cat_id) }}
-                        {{ matchFor(r).candidates[0].score }}分</small
+                          r.mode === "shared" ? "共享盆样本" : catName(r.cat_id)
+                        }}</span
+                      ><small
+                        :class="{
+                          'anomaly-label': poolStatus(r) === 'anomaly',
+                        }"
+                        >{{ statusText(r)
+                        }}{{ r.batch_id ? " · 同批次" : "" }}</small
                       >
                     </td>
                     <td>
@@ -1265,7 +1334,7 @@ onMounted(async () => {
                           class="icon-btn"
                           @click="openModal('record', r)"
                           :aria-label="'编辑记录' + r.id"
-                          :title="r.cat_id ? '编辑记录' : '核对归属 / 编辑'"
+                          :title="'编辑采样记录'"
                         >
                           <Pencil :size="14" /></button
                         ><button
@@ -1282,7 +1351,7 @@ onMounted(async () => {
               </table>
               <div v-if="!filteredRecords.length" class="empty">
                 这个范围还没有记录。{{
-                  canWrite ? "点击“记一笔屎尿”开始观察吧。" : ""
+                  canWrite ? "点击“共享盆采集”，或先记录7天隔离基线。" : ""
                 }}
               </div>
             </div>
@@ -1689,7 +1758,19 @@ onMounted(async () => {
       </div></Transition
     >
   </div>
-  <div v-if="modal" class="modal-backdrop" @click.self="!busy && (modal = '')">
+  <SharedCollection
+    v-if="modal === 'batch'"
+    :table-id="dataset.table.id"
+    :boxes="boxes"
+    :litters="litters"
+    @close="modal = ''"
+    @saved="collected"
+  />
+  <div
+    v-if="modal && modal !== 'batch'"
+    class="modal-backdrop"
+    @click.self="!busy && (modal = '')"
+  >
     <section
       class="modal"
       role="dialog"
@@ -1911,7 +1992,20 @@ onMounted(async () => {
             /></label
         ></template>
         <template v-if="modal === 'record'"
-          ><div class="segmented record-type">
+          ><label
+            >采样模式<select v-model="form.mode" @change="onModeChange">
+              <option value="baseline">前7天 · 单猫隔离基线</option>
+              <option value="shared">共享盆 · 不指定归属</option>
+              <option value="observed">已目击的个体观察</option>
+            </select></label
+          >
+          <div class="form-note" v-if="form.mode === 'baseline'">
+            <CircleHelp :size="16" />
+            <p>
+              建议每只猫连续隔离采样7天，保持猫砂与称量方式一致。一行一个完整尿团/便块，填写重量。只标记健康样本为基线；异常症状用个体观察记录。
+            </p>
+          </div>
+          <div class="segmented record-type">
             <button
               type="button"
               :class="{ active: form.kind === 'urine' }"
@@ -1949,8 +2043,11 @@ onMounted(async () => {
                 type="datetime-local"
                 v-model="form.occurred_at"
                 required /></label
-            ><label class="full"
-              >猫咪归属<select v-model="form.cat_id">
+            ><label class="full" v-if="form.mode !== 'shared'"
+              >猫咪归属<select
+                v-model="form.cat_id"
+                :required="form.mode === 'baseline'"
+              >
                 <option value="">不确定 / 混合收集</option>
                 <option v-for="c in eligibleCats" :key="c.id" :value="c.id">
                   {{ c.name }}（已目击 / 身份确认）
@@ -1958,10 +2055,10 @@ onMounted(async () => {
               </select></label
             >
           </div>
-          <div class="form-note" v-if="!form.cat_id">
+          <div class="form-note" v-if="form.mode === 'shared'">
             <CircleHelp :size="16" />
             <p>
-              未知归属也可以先记下来。匹配分只提供核对线索，请在目击或身份确认后再选择猫咪。
+              共享样本无需归属。用7天单猫基线检测异常，再通过整批数据的差异支持缩小排查范围。多块采集请使用“共享盆采集”。
             </p>
           </div>
           <p class="form-hint" v-if="selectedBox">
@@ -1990,6 +2087,7 @@ onMounted(async () => {
                 max="2000"
                 step="0.1"
                 :disabled="form.no_output"
+                :required="form.mode === 'baseline'"
                 placeholder="铲出后称重" /></label
             ><template v-if="form.kind === 'urine' && !form.no_output"
               ><label

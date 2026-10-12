@@ -21,24 +21,30 @@ type Match struct {
 	Reason     string      `json:"reason"`
 }
 type Alert struct {
-	CatID     *uint   `json:"cat_id"`
-	BoxID     uint    `json:"box_id"`
-	RecordID  uint    `json:"record_id"`
-	Level     string  `json:"level"`
-	Title     string  `json:"title"`
-	Detail    string  `json:"detail"`
-	Metric    string  `json:"metric"`
-	Z         float64 `json:"z"`
-	Common    bool    `json:"common"`
-	Direction float64 `json:"-"`
-	Key       string  `json:"-"`
+	CatID        *uint     `json:"cat_id"`
+	BoxID        uint      `json:"box_id"`
+	RecordID     uint      `json:"record_id"`
+	Level        string    `json:"level"`
+	Title        string    `json:"title"`
+	Detail       string    `json:"detail"`
+	Metric       string    `json:"metric"`
+	Z            float64   `json:"z"`
+	Common       bool      `json:"common"`
+	Suspects     []Suspect `json:"suspects,omitempty"`
+	Localization string    `json:"localization,omitempty"`
+	AnchorCatID  *uint     `json:"anchor_cat_id,omitempty"`
+	Direction    float64   `json:"-"`
+	Key          string    `json:"-"`
 }
 type Report struct {
-	Matches      []Match `json:"matches"`
-	Alerts       []Alert `json:"alerts"`
-	Confirmed    int     `json:"confirmed"`
-	Unknown      int     `json:"unknown"`
-	BaselineDays int     `json:"baseline_days"`
+	Matches         []Match `json:"matches"`
+	Alerts          []Alert `json:"alerts"`
+	Confirmed       int     `json:"confirmed"`
+	Unknown         int     `json:"unknown"`
+	BaselineDays    int     `json:"baseline_days"`
+	Pools           []Pool  `json:"pools"`
+	SharedCount     int     `json:"shared_count"`
+	SharedAnomalies int     `json:"shared_anomalies"`
 }
 
 func median(xs []float64) float64 {
@@ -168,7 +174,9 @@ func Analyze(rs []model.Record, weights []model.Weight, now time.Time) Report {
 			continue
 		}
 		if now.Sub(r.OccurredAt) <= 7*24*time.Hour {
-			rep.Matches = append(rep.Matches, match(r, rs, weights))
+			if r.Mode != "shared" {
+				rep.Matches = append(rep.Matches, match(r, rs, weights))
+			}
 			if r.CatID == nil {
 				rep.Unknown++
 			} else {

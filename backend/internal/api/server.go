@@ -103,6 +103,7 @@ func New(db *gorm.DB, cfg config.Config) *gin.Engine {
 	write.POST("/boxes", s.saveBox)
 	write.PATCH("/boxes/:id", s.saveBox)
 	write.POST("/records", s.saveRecord)
+	write.POST("/batches", s.saveBatch)
 	write.PATCH("/records/:id", s.saveRecord)
 	write.DELETE("/records/:id", s.deleteRecord)
 	write.POST("/weights", s.saveWeight)
@@ -493,7 +494,7 @@ func (s *Server) data(c *gin.Context) {
 			return
 		}
 	}
-	c.JSON(200, gin.H{"table": c.MustGet("table"), "role": c.GetString("role"), "join_status": c.GetString("join_status"), "cats": cats, "litters": litters, "boxes": boxes, "records": rs, "weights": weights, "analysis": analysis.Analyze(rs, weights, time.Now())})
+	c.JSON(200, gin.H{"table": c.MustGet("table"), "role": c.GetString("role"), "join_status": c.GetString("join_status"), "cats": cats, "litters": litters, "boxes": boxes, "records": rs, "weights": weights, "analysis": analysis.AnalyzePools(rs, weights, boxes, litters, time.Now(), s.Config.TrainingTimezone)})
 }
 func (s *Server) resource(c *gin.Context, dest any) bool {
 	id, ok := idParam(c, "id")
@@ -643,6 +644,7 @@ func (s *Server) saveBox(c *gin.Context) {
 
 type recordInput struct {
 	Kind         string    `json:"kind" binding:"required,oneof=urine stool"`
+	Mode         string    `json:"mode" binding:"omitempty,oneof=baseline shared observed"`
 	CatID        *uint     `json:"cat_id"`
 	BoxID        uint      `json:"box_id" binding:"required"`
 	OccurredAt   time.Time `json:"occurred_at" binding:"required"`
@@ -680,36 +682,60 @@ func (s *Server) saveRecord(c *gin.Context) {
 	if !bind(c, &in) || !validDate(c, in.OccurredAt) {
 		return
 	}
-	if in.NoOutput {
-		if in.Count != 0 || in.Grams != nil || in.DiameterCM != nil {
-			fail(c, 400, "无产出时个数为0，不能填写重量和直径")
-			return
-		}
-	} else if in.Count < 1 {
-		fail(c, 400, "有产出时个数至少为1")
-		return
-	}
-	if in.Kind == "urine" && (in.Moisture != nil || in.Size != nil || in.Shape != "") {
-		fail(c, 400, "尿团记录不能包含大便维度")
-		return
-	}
-	if in.Kind == "stool" && (in.Looseness != nil || in.DiameterCM != nil) {
-		fail(c, 400, "大便记录不能包含尿团维度")
-		return
-	}
-	if !in.NoOutput && in.Kind == "stool" && (in.Moisture == nil || in.Size == nil || in.Shape == "") {
-		fail(c, 400, "请填写大便干湿、形态、大小")
-		return
-	}
 	var r model.Record
 	editing := c.Param("id") != ""
 	if editing && !s.resource(c, &r) {
 		return
 	}
-	var b model.Box
-	if s.DB.First(&b, "id = ? AND table_id = ?", in.BoxID, tid(c)).Error != nil || (!editing && b.Archived) {
-		fail(c, 400, "猫砂盆不可用")
+	if !s.populateRecord(c, s.DB, &r, in, editing) {
 		return
+	}
+	if e := s.DB.Save(&r).Error; e != nil {
+		fail(c, 500, "保存失败")
+		return
+	}
+	c.JSON(200, r)
+}
+func (s *Server) populateRecord(c *gin.Context, db *gorm.DB, r *model.Record, in recordInput, editing bool) bool {
+	if !validDate(c, in.OccurredAt) {
+		return false
+	}
+	if in.Mode == "" {
+		in.Mode = "observed"
+	}
+	if in.Mode == "shared" && in.CatID != nil {
+		fail(c, 400, "共享采集不需要指定猫咪，请清空归属")
+		return false
+	}
+	if in.Mode == "baseline" && (in.CatID == nil || in.Count != 1 || in.NoOutput || in.Blood || in.Straining || in.Grams == nil) {
+		fail(c, 400, "基线须为单猫隔离后的健康单块记录，指定猫咪、填写重量、个数为1")
+		return false
+	}
+	if in.NoOutput {
+		if in.Count != 0 || in.Grams != nil || in.DiameterCM != nil {
+			fail(c, 400, "无产出时个数为0，不能填写重量和直径")
+			return false
+		}
+	} else if in.Count < 1 {
+		fail(c, 400, "有产出时个数至少为1")
+		return false
+	}
+	if in.Kind == "urine" && (in.Moisture != nil || in.Size != nil || in.Shape != "") {
+		fail(c, 400, "尿团记录不能包含大便维度")
+		return false
+	}
+	if in.Kind == "stool" && (in.Looseness != nil || in.DiameterCM != nil) {
+		fail(c, 400, "大便记录不能包含尿团维度")
+		return false
+	}
+	if !in.NoOutput && in.Kind == "stool" && (in.Moisture == nil || in.Size == nil || in.Shape == "") {
+		fail(c, 400, "请填写大便干湿、形态、大小")
+		return false
+	}
+	var b model.Box
+	if db.First(&b, "id = ? AND table_id = ?", in.BoxID, tid(c)).Error != nil || (!editing && b.Archived) {
+		fail(c, 400, "猫砂盆不可用")
+		return false
 	}
 	sameSnapshot := editing && r.BoxID == b.ID
 	eligible := b.CatIDs
@@ -718,16 +744,16 @@ func (s *Server) saveRecord(c *gin.Context) {
 	}
 	if in.CatID != nil {
 		var cat model.Cat
-		if s.DB.First(&cat, "id = ? AND table_id = ?", *in.CatID, tid(c)).Error != nil || !contains(eligible, *in.CatID) {
+		if db.First(&cat, "id = ? AND table_id = ?", *in.CatID, tid(c)).Error != nil || !contains(eligible, *in.CatID) {
 			fail(c, 400, "此猫不在记录对应的猫砂盆使用名单中")
-			return
+			return false
 		}
 	}
 	if !sameSnapshot {
 		var l model.Litter
-		if s.DB.First(&l, "id = ? AND table_id = ?", b.LitterID, tid(c)).Error != nil {
+		if db.First(&l, "id = ? AND table_id = ?", b.LitterID, tid(c)).Error != nil {
 			fail(c, 400, "猫砂配置不可用")
-			return
+			return false
 		}
 		r.LitterKey = fmt.Sprintf("%d:v%d", l.ID, l.Version)
 		r.LitterName = l.Name
@@ -739,6 +765,7 @@ func (s *Server) saveRecord(c *gin.Context) {
 		r.CreatorID = uid(c)
 	}
 	r.Kind = in.Kind
+	r.Mode = in.Mode
 	r.CatID = in.CatID
 	r.BoxID = in.BoxID
 	r.OccurredAt = in.OccurredAt
@@ -754,11 +781,46 @@ func (s *Server) saveRecord(c *gin.Context) {
 	r.Straining = in.Straining
 	r.NoOutput = in.NoOutput
 	r.Notes = in.Notes
-	if e := s.DB.Save(&r).Error; e != nil {
-		fail(c, 500, "保存失败")
+	return true
+}
+
+func (s *Server) saveBatch(c *gin.Context) {
+	var in struct {
+		Items []recordInput `json:"items" binding:"required,min=1,max=30,dive"`
+	}
+	if !bind(c, &in) {
 		return
 	}
-	c.JSON(200, r)
+	items := []model.Record{}
+	token := make([]byte, 12)
+	if _, e := rand.Read(token); e != nil {
+		fail(c, 500, "采集保存失败")
+		return
+	}
+	batchID := hex.EncodeToString(token)
+	invalid := errors.New("invalid batch")
+	err := s.DB.Transaction(func(tx *gorm.DB) error {
+		for _, item := range in.Items {
+			if item.Mode != "shared" || item.CatID != nil || item.Count != 1 || item.NoOutput || item.BoxID != in.Items[0].BoxID || !item.OccurredAt.Equal(in.Items[0].OccurredAt) {
+				fail(c, 400, "一次共享采集须为同一盆、同一时间的逐块记录，不指定猫咪")
+				return invalid
+			}
+			r := model.Record{BatchID: batchID}
+			if !s.populateRecord(c, tx, &r, item, false) {
+				return invalid
+			}
+			items = append(items, r)
+		}
+		return tx.Create(&items).Error
+	})
+	if errors.Is(err, invalid) {
+		return
+	}
+	if err != nil {
+		fail(c, 500, "采集保存失败，未保存任何部分记录")
+		return
+	}
+	c.JSON(201, gin.H{"batch_id": batchID, "records": items})
 }
 func (s *Server) deleteRecord(c *gin.Context) {
 	var r model.Record
