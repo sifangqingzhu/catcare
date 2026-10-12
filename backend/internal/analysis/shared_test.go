@@ -71,8 +71,8 @@ func TestDifferentialRanksChangedCatWithoutAssigningItems(t *testing.T) {
 	rs = append(rs, sharedItem(901, now, 40, 4), sharedItem(902, now, 40, 4), sharedItem(903, now, 15, 2), sharedItem(904, now, 15, 2))
 	r := AnalyzePools(rs, nil, bs, ls, now)
 	a := sharedAlert(r)
-	if a == nil || len(a.Suspects) == 0 || a.Suspects[0].CatID != 2 || a.AnchorCatID != nil || a.CatID != nil {
-		t.Fatalf("one batch may rank but must not claim single-cat localization: %+v", a)
+	if a == nil || len(a.Suspects) != 2 || a.AnchorCatID != nil || a.CatID != nil {
+		t.Fatalf("normal samples cannot exclude intermittent change of either cat: %+v", a)
 	}
 	if r.SharedAnomalies != 2 {
 		t.Fatal("two novel items should alarm")
@@ -87,7 +87,7 @@ func TestOverlapAlarmsWithoutLockingCat(t *testing.T) {
 	rs, bs, ls, now := sharedFixture(true)
 	rs = append(rs, sharedItem(901, now, 40, 4), sharedItem(902, now, 40, 4), sharedItem(903, now, 15, 2), sharedItem(904, now, 15, 2))
 	a := sharedAlert(AnalyzePools(rs, nil, bs, ls, now))
-	if a == nil || a.AnchorCatID != nil || a.Localization != "ambiguous" {
+	if a == nil || a.AnchorCatID != nil || a.Localization != "candidate_set" || len(a.Suspects) != 2 {
 		t.Fatalf("overlap must remain ambiguous even when anomaly exists: %+v", a)
 	}
 }
@@ -162,7 +162,7 @@ func TestEntireCollectionShiftCannotSingleOutOneCat(t *testing.T) {
 	rs, bs, ls, now := sharedFixture(false)
 	rs = append(rs, sharedItem(901, now, 120, 12), sharedItem(902, now, 120, 12), sharedItem(903, now, 160, 15), sharedItem(904, now, 160, 15))
 	a := sharedAlert(AnalyzePools(rs, nil, bs, ls, now))
-	if a == nil || a.AnchorCatID != nil || !a.Common {
+	if a == nil || a.AnchorCatID != nil || len(a.Suspects) < 2 {
 		t.Fatal("a collection-wide shift cannot implicate one cat without healthy control evidence")
 	}
 }

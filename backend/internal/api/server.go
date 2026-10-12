@@ -2,11 +2,14 @@ package api
 
 import (
 	"catcare/internal/analysis"
+	"catcare/internal/analysisjobs"
 	"catcare/internal/config"
 	"catcare/internal/model"
+	"context"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -29,12 +32,16 @@ type Server struct {
 	Config   config.Config
 	limiter  sync.Mutex
 	attempts map[string][]time.Time
+	jobs     *analysisjobs.Manager
 }
 
 func New(db *gorm.DB, cfg config.Config) *gin.Engine {
+	return NewWithContext(context.Background(), db, cfg)
+}
+func NewWithContext(ctx context.Context, db *gorm.DB, cfg config.Config) *gin.Engine {
 	gin.SetMode(gin.ReleaseMode)
 	gin.EnableJsonDecoderDisallowUnknownFields()
-	s := &Server{DB: db, Config: cfg, attempts: map[string][]time.Time{}}
+	s := &Server{DB: db, Config: cfg, attempts: map[string][]time.Time{}, jobs: analysisjobs.New(ctx, analysisjobs.DefaultCompute)}
 	r := gin.New()
 	r.Use(gin.Recovery())
 	_ = r.SetTrustedProxies(cfg.TrustedProxies)
@@ -89,6 +96,8 @@ func New(db *gorm.DB, cfg config.Config) *gin.Engine {
 	tables := auth.Group("/tables/:table")
 	tables.Use(s.access)
 	tables.GET("/data", s.data)
+	tables.GET("/analysis/:job", s.analysisStatus)
+	tables.POST("/analysis", s.data)
 	tables.PATCH("", s.owner, s.updateTable)
 	tables.POST("/join", s.join)
 	tables.GET("/members", s.members)
@@ -488,13 +497,41 @@ func (s *Server) data(c *gin.Context) {
 	boxes := []model.Box{}
 	rs := []model.Record{}
 	weights := []model.Weight{}
-	for _, dest := range []any{&cats, &litters, &boxes, &rs, &weights} {
-		if e := s.DB.Where("table_id = ?", tid(c)).Order("id asc").Find(dest).Error; e != nil {
-			fail(c, 500, "加载失败")
-			return
+	err := s.DB.WithContext(c.Request.Context()).Transaction(func(tx *gorm.DB) error {
+		for _, dest := range []any{&cats, &litters, &boxes, &rs, &weights} {
+			if e := tx.Where("table_id = ?", tid(c)).Order("id asc").Find(dest).Error; e != nil {
+				return e
+			}
 		}
+		return nil
+	}, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
+	if err != nil {
+		fail(c, 500, "加载失败")
+		return
 	}
-	c.JSON(200, gin.H{"table": c.MustGet("table"), "role": c.GetString("role"), "join_status": c.GetString("join_status"), "cats": cats, "litters": litters, "boxes": boxes, "records": rs, "weights": weights, "analysis": analysis.AnalyzePools(rs, weights, boxes, litters, time.Now(), s.Config.TrainingTimezone)})
+	now := time.Now()
+	zone := "UTC"
+	if s.Config.TrainingTimezone != nil {
+		zone = s.Config.TrainingTimezone.String()
+	}
+	job, result, err := s.jobs.Submit(tid(c), analysisjobs.Snapshot{Records: rs, Weights: weights, Boxes: boxes, Litters: litters, Now: now, Timezone: zone}, c.Request.Method == "POST")
+	if err != nil {
+		fail(c, 503, "分析服务暂不可用，记录仍已保存")
+		return
+	}
+	report := analysis.Immediate(rs, now, zone)
+	if result != nil {
+		report = *result
+	}
+	c.JSON(200, gin.H{"table": c.MustGet("table"), "role": c.GetString("role"), "join_status": c.GetString("join_status"), "cats": cats, "litters": litters, "boxes": boxes, "records": rs, "weights": weights, "analysis": report, "analysis_job": job})
+}
+func (s *Server) analysisStatus(c *gin.Context) {
+	job, result, ok := s.jobs.Get(tid(c), c.Param("job"))
+	if !ok {
+		fail(c, 404, "分析任务已更新或不存在")
+		return
+	}
+	c.JSON(200, gin.H{"job": job, "analysis": result})
 }
 func (s *Server) resource(c *gin.Context, dest any) bool {
 	id, ok := idParam(c, "id")
@@ -552,6 +589,7 @@ func (s *Server) saveCat(c *gin.Context) {
 		fail(c, 500, "保存失败")
 		return
 	}
+	s.jobs.Invalidate(tid(c))
 	c.JSON(200, cat)
 }
 
@@ -587,6 +625,7 @@ func (s *Server) saveLitter(c *gin.Context) {
 		fail(c, 500, "保存失败")
 		return
 	}
+	s.jobs.Invalidate(tid(c))
 	c.JSON(200, l)
 }
 
@@ -639,6 +678,7 @@ func (s *Server) saveBox(c *gin.Context) {
 		fail(c, 500, "保存失败")
 		return
 	}
+	s.jobs.Invalidate(tid(c))
 	c.JSON(200, b)
 }
 
@@ -706,6 +746,7 @@ func (s *Server) saveRecord(c *gin.Context) {
 		fail(c, 500, "保存失败")
 		return
 	}
+	s.jobs.Invalidate(tid(c))
 	c.JSON(200, r)
 }
 func (s *Server) populateRecord(c *gin.Context, db *gorm.DB, r *model.Record, in recordInput, editing bool) bool {
@@ -923,6 +964,7 @@ func (s *Server) saveBatch(c *gin.Context) {
 		fail(c, 500, "采集保存失败，未保存任何部分记录")
 		return
 	}
+	s.jobs.Invalidate(tid(c))
 	c.JSON(201, gin.H{"batch_id": batchID, "records": items})
 }
 func (s *Server) deleteRecord(c *gin.Context) {
@@ -934,6 +976,7 @@ func (s *Server) deleteRecord(c *gin.Context) {
 		fail(c, 500, "删除失败")
 		return
 	}
+	s.jobs.Invalidate(tid(c))
 	c.JSON(200, gin.H{"ok": true})
 }
 func (s *Server) saveWeight(c *gin.Context) {
@@ -956,6 +999,7 @@ func (s *Server) saveWeight(c *gin.Context) {
 		fail(c, 500, "保存失败")
 		return
 	}
+	s.jobs.Invalidate(tid(c))
 	c.JSON(201, w)
 }
 func (s *Server) deleteWeight(c *gin.Context) {
@@ -967,5 +1011,6 @@ func (s *Server) deleteWeight(c *gin.Context) {
 		fail(c, 500, "删除失败")
 		return
 	}
+	s.jobs.Invalidate(tid(c))
 	c.JSON(200, gin.H{"ok": true})
 }

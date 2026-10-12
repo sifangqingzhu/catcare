@@ -157,14 +157,14 @@ func TestNormalValidationSeparatesCoverageFromAccuracy(t *testing.T) {
 		}
 	}
 }
-func TestMultipleBatchesSupportOnlyProvisionalCandidate(t *testing.T) {
+func TestMultipleBatchesDoNotExcludeIntermittentChanges(t *testing.T) {
 	rows, bs, ls, now := sharedFixture(false)
 	for i := 0; i < 12; i++ {
 		g, d := 40.0, 4.0
 		if i%3 == 2 {
 			g, d = 15, 2
 		}
-		r := sharedItem(uint(900+i), now, g, d)
+		r := sharedItem(uint(900+i), now.Add(-time.Duration(i/6)*2*time.Hour), g, d)
 		r.BatchID = fmt.Sprintf("batch-%d", i/6)
 		r.CollectionComplete = true
 		rows = append(rows, r)
@@ -172,8 +172,8 @@ func TestMultipleBatchesSupportOnlyProvisionalCandidate(t *testing.T) {
 	rep := AnalyzePools(rows, nil, bs, ls, now)
 	a := sharedAlert(rep)
 	pool := poolKind(rep, "urine")
-	if a == nil || a.AnchorCatID == nil || *a.AnchorCatID != 2 || a.Localization != "provisional" || pool.BatchAnalysis.Batches != 2 {
-		t.Fatalf("multiple batches rank a provisional candidate: alert %+v analysis %+v", a, pool.BatchAnalysis)
+	if a == nil || a.AnchorCatID != nil || len(a.Suspects) != 2 || pool.BatchAnalysis.Batches != 2 {
+		t.Fatalf("two periods still allow both cats' intermittent changes: alert %+v analysis %+v", a, pool.BatchAnalysis)
 	}
 	for _, r := range rows {
 		if r.Mode == "shared" && r.CatID != nil {
@@ -196,15 +196,10 @@ func TestPartialChangeRetainsNormalSamplesFromSameCat(t *testing.T) {
 		r.CollectionComplete = true
 		rows = append(rows, r)
 	}
-	pool := poolKind(AnalyzePools(rows, nil, bs, ls, now), "urine")
-	hasPartial := false
-	for _, h := range pool.BatchAnalysis.Hypotheses {
-		if h.Name == "cat_change" && h.Gain > 0 && h.ChangedFraction < 1 {
-			hasPartial = true
-		}
-	}
-	if !hasPartial {
-		t.Fatalf("normal + changed samples must coexist: %+v", pool.BatchAnalysis)
+	rep := AnalyzePools(rows, nil, bs, ls, now)
+	j := rep.JointAnalyses[0]
+	if j.NormalGain <= 3 || j.Best != "joint_change" || !containsID(j.CandidateIDs, 1) || !containsID(j.CandidateIDs, 2) {
+		t.Fatalf("normal + changed samples must coexist under either cat hypothesis: %+v", j)
 	}
 }
 func TestCollisionWithAnotherHealthyCatNeverConfirmsIdentity(t *testing.T) {

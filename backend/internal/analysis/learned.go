@@ -4,6 +4,7 @@ package analysis
 // alternatives are separate. Every reported score is uncalibrated model evidence.
 import (
 	"catcare/internal/model"
+	"context"
 	"fmt"
 	"math"
 	"sort"
@@ -768,7 +769,13 @@ func profileWindow(rows []model.Record, fs []Fingerprint, scenario int, h window
 			if h.name == "common_shift" {
 				value, _, _ = itemLikelihood(r, f, scenario, h.shift)
 			}
-			terms = append(terms, math.Log(weights[i])+value)
+			if r.CatID != nil && knownIdentity(r) {
+				if *r.CatID == f.CatID {
+					terms = append(terms, value)
+				}
+			} else {
+				terms = append(terms, math.Log(weights[i])+value)
+			}
 		}
 		if h.name == "unexplained" {
 			// Broad normalized contamination density in the recorded log-unit domain.
@@ -782,7 +789,7 @@ func profileWindow(rows []model.Record, fs []Fingerprint, scenario int, h window
 			}
 			unknown -= float64(len(categories(r))) * math.Log(5)
 			terms = append(terms, unknown)
-			for i := 0; i < len(fs); i++ {
+			for i := 0; i < len(terms)-1; i++ {
 				terms[i] += math.Log(0.9)
 			}
 		}
@@ -832,12 +839,15 @@ func bestWindow(rows []model.Record, fs []Fingerprint, scenario int, h windowMod
 	for i := range weights {
 		weights[i] = 1 / float64(n)
 	}
-	for iteration := 0; iteration < 25; iteration++ {
+	for iteration := 0; iteration < 12; iteration++ {
 		totals := make([]float64, n)
 		for i := range totals {
 			totals[i] = 0.5
 		}
-		for _, row := range matrix {
+		for rowIndex, row := range matrix {
+			if rows[rowIndex].CatID != nil && knownIdentity(rows[rowIndex]) {
+				continue
+			}
 			terms := make([]float64, n)
 			for i := range row {
 				terms[i] = math.Log(weights[i]) + row[i]
@@ -1095,6 +1105,13 @@ func round2(v float64) float64 {
 }
 
 func AnalyzePools(rs []model.Record, weights []model.Weight, boxes []model.Box, litters []model.Litter, now time.Time, locations ...*time.Location) Report {
+	rep, _ := AnalyzePoolsContext(context.Background(), rs, weights, boxes, litters, now, nil, locations...)
+	return rep
+}
+func AnalyzePoolsContext(ctx context.Context, rs []model.Record, weights []model.Weight, boxes []model.Box, litters []model.Litter, now time.Time, progress func(int, string), locations ...*time.Location) (Report, error) {
+	if err := ctx.Err(); err != nil {
+		return Report{}, err
+	}
 	rep := Analyze(rs, weights, now)
 	rep.CalibrationDays = 7
 	loc := time.UTC
@@ -1152,7 +1169,13 @@ func AnalyzePools(rs []model.Record, weights []model.Weight, boxes []model.Box, 
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)
-	for _, key := range keys {
+	for index, key := range keys {
+		if err := ctx.Err(); err != nil {
+			return Report{}, err
+		}
+		if progress != nil {
+			progress(5+15*index/max(1, len(keys)), "建立基准与时间覆盖")
+		}
 		g := groups[key]
 		cutoff := now
 		for _, r := range g.rows {
@@ -1160,7 +1183,7 @@ func AnalyzePools(rs []model.Record, weights []model.Weight, boxes []model.Box, 
 				cutoff = r.OccurredAt
 			}
 		}
-		pool := Pool{BoxID: g.box, Kind: g.kind, LitterKey: g.key, Status: "need_baseline", ModelVersion: "time-mixture-v2", Profiles: []Fingerprint{}, Observations: []PoolObservation{}}
+		pool := Pool{BoxID: g.box, Kind: g.kind, LitterKey: g.key, Status: "need_baseline", ModelVersion: "joint-mixture-v3", Profiles: []Fingerprint{}, Observations: []PoolObservation{}}
 		ready := len(g.cats) > 0
 		for _, c := range g.cats {
 			f := fingerprint(c, g.kind, g.key, rs, cutoff, loc)
@@ -1253,7 +1276,7 @@ func AnalyzePools(rs []model.Record, weights []model.Weight, boxes []model.Box, 
 			}
 			pool.Observations = append(pool.Observations, o)
 		}
-		pool.BatchAnalysis = compareBatches(g.rows, pool.Profiles)
+		pool.BatchAnalysis = BatchComparison{State: "pending_joint", Reason: "由联合组合模型比较，不强行单猫归属", Hypotheses: []Hypothesis{}, Suspects: []Suspect{}}
 		b := pool.BatchAnalysis
 		distributionChange := b.State == "ambiguous" || b.State == "provisional" || b.State == "common_shift" || b.State == "unexplained"
 		if pool.Anomalies > 0 || distributionChange {
@@ -1267,5 +1290,11 @@ func AnalyzePools(rs []model.Record, weights []model.Weight, boxes []model.Box, 
 		rep.Pools = append(rep.Pools, pool)
 	}
 	sort.SliceStable(rep.Alerts, func(i, j int) bool { return rep.Alerts[i].Level == "urgent" && rep.Alerts[j].Level != "urgent" })
-	return rep
+	if err := analyzeJoint(ctx, &rep, rs, now, progress); err != nil {
+		return Report{}, err
+	}
+	if progress != nil {
+		progress(100, "分析完成")
+	}
+	return rep, nil
 }

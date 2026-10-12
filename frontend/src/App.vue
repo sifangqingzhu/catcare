@@ -1,5 +1,5 @@
 <script setup>
-import { ref, computed, onMounted } from "vue";
+import { ref, computed, onMounted, onUnmounted } from "vue";
 import {
   PawPrint,
   LayoutDashboard,
@@ -70,6 +70,37 @@ const tables = ref([]),
   inviteRole = ref("editor"),
   publicSearch = ref("");
 const baselineExpanded = ref(false);
+const analysisReady = computed(() => !!dataset.value?.analysis_job?.has_result);
+let analysisTimer, analysisGeneration = 0, tableGeneration = 0;
+function stopAnalysisPolling() { clearTimeout(analysisTimer); analysisGeneration++; }
+function acceptData(data) {
+  stopAnalysisPolling(); dataset.value = data;
+  const generation = analysisGeneration, table = data.table.id, job = data.analysis_job;
+  if (!job || !['queued','running'].includes(job.status)) return;
+  const poll = async () => {
+    if (generation !== analysisGeneration || dataset.value?.table.id !== table) return;
+    try {
+      const result = await api(`/tables/${table}/analysis/${job.id}`);
+      if (generation !== analysisGeneration || dataset.value?.table.id !== table) return;
+      dataset.value.analysis_job = result.job;
+      if (result.analysis && result.job.has_result) dataset.value.analysis = result.analysis;
+      if (['queued','running'].includes(result.job.status)) analysisTimer = setTimeout(poll,1500);
+    } catch (e) {
+      if (generation !== analysisGeneration) return;
+      if (e.status === 404) {
+        try { const newer=await api(`/tables/${table}/data`); if(generation===analysisGeneration) acceptData(newer); }
+        catch (next) { if(generation===analysisGeneration) {stopAnalysisPolling(); dataset.value=null; error.value=next.message;} }
+      } else { dataset.value.analysis_job = {...job,status:'failed',error:e.message}; }
+    }
+  };
+  analysisTimer = setTimeout(poll,800);
+}
+async function retryAnalysis() {
+  const table=dataset.value?.table.id; if(!table)return;
+  const data=await api(`/tables/${table}/analysis`,'POST');
+  if(dataset.value?.table.id===table) acceptData(data);
+}
+onUnmounted(stopAnalysisPolling);
 const nav = [
   { id: "dashboard", name: "生活概览", icon: LayoutDashboard },
   { id: "records", name: "屎尿记录", icon: ClipboardList },
@@ -266,16 +297,17 @@ async function initialize() {
   else dataset.value = null;
 }
 async function loadTable(id) {
+  const generation=++tableGeneration;stopAnalysisPolling();
   loading.value = true;
   try {
-    dataset.value = await api(`/tables/${id}/data`);
+    const data=await api(`/tables/${id}/data`); if(generation!==tableGeneration)return; acceptData(data);
     selectedCat.value = 0;
     search.value = "";
     tableMenu.value = false;
     if (tab.value === "explore") tab.value = "dashboard";
     members.value = [];
   } finally {
-    loading.value = false;
+    if(generation===tableGeneration) loading.value = false;
   }
 }
 async function switchTable(id) {
@@ -296,13 +328,14 @@ async function go(id) {
 async function refresh() {
   const id = dataset.value?.table.id;
   tables.value = await api("/tables");
-  if (id) dataset.value = await api(`/tables/${id}/data`);
+  if (id) { const data=await api(`/tables/${id}/data`); if(dataset.value?.table.id===id) acceptData(data); }
   if (tab.value === "share" && dataset.value.role !== "public")
     members.value = await api(`/tables/${id}/members`);
 }
 async function logout() {
   await run(async () => {
     await api("/auth/logout", "POST");
+    stopAnalysisPolling();tableGeneration++;
     user.value = null;
     dataset.value = null;
     isDemo.value = false;
@@ -405,7 +438,8 @@ function startBaseline(catId = 0) {
 function setBaselineVersion() {
   const f = form.value;
   if (f.mode !== 'baseline' || f.id) return;
-  f.baseline_version = report.value.pools?.find(p => p.box_id === Number(f.box_id) && p.kind === f.kind)?.profiles.find(p => p.cat_id === Number(f.cat_id))?.version || 1;
+  const box=boxes.value.find(b=>b.id===Number(f.box_id)),litter=litters.value.find(l=>l.id===box?.litter_id);
+  f.baseline_version = Math.max(1,...records.value.filter(r=>r.mode==='baseline'&&r.cat_id===Number(f.cat_id)&&r.kind===f.kind&&r.litter_key===`${litter?.id}:v${litter?.version}`).map(r=>r.baseline_version||1));
 }
 function onModeChange() {
   if (form.value.mode === "shared") {
@@ -425,8 +459,13 @@ async function collected() {
   modal.value = "";
   await run(async () => {
     await refresh();
-    say("共享采集已保存，已更新异常观察");
+    say("共享采集已保存，后台分析已排队");
   });
+}
+function startFollowUp(a) {
+  openModal('record');form.value.mode='observed';form.value.identity_method='witnessed';form.value.kind=a.kind;
+  form.value.box_id=boxes.value.find(b=>!b.archived&&b.id===a.box_id&&b.cat_ids.includes(a.cat_id))?.id || boxes.value.find(b=>!b.archived&&b.cat_ids.includes(a.cat_id))?.id || '';
+  form.value.cat_id=a.cat_id;form.value.notes='联合分析建议的独立复核；请目击确认实际来源，不从候选猜测身份。';
 }
 function onBoxChange() {
   form.value.cat_id = "";
@@ -991,6 +1030,11 @@ onMounted(async () => {
                 <Plus :size="17" />
               </button></div
           ></template>
+          <div v-if="dataset.analysis_job && !analysisReady" class="analysis-status" role="status" aria-live="polite">
+            <LoaderCircle v-if="['queued','running'].includes(dataset.analysis_job.status)" :size="15" class="spin" />
+            <span>{{ dataset.analysis_job.error || `${dataset.analysis_job.phase} · ${dataset.analysis_job.progress}%` }}<small>记录可继续保存，计算在后台进行。</small></span>
+            <button v-if="['failed','deferred'].includes(dataset.analysis_job.status)" class="text-btn" @click="run(retryAnalysis)">重试分析</button>
+          </div>
           <template v-if="tab === 'dashboard'">
             <div class="stats-grid">
               <article class="stat-card">
@@ -1111,9 +1155,9 @@ onMounted(async () => {
                   <span class="soft-icon"><Users :size="18" /></span>
                 </div>
                 <div class="shared-number">
-                  <strong>{{ report.shared_anomalies || 0 }}</strong
+                  <strong>{{ analysisReady ? (report.shared_anomalies || 0) : '—' }}</strong
                   ><span
-                    >块共享样本有变化线索<small
+                    >{{ analysisReady ? '块共享样本有变化线索' : '共享样本正在分析' }}<small
                       >先检测异常，再缩小排查范围</small
                     ></span
                   >
@@ -1154,7 +1198,7 @@ onMounted(async () => {
                 </button>
               </section>
             </div>
-            <BaselineGuide
+            <BaselineGuide v-if="analysisReady"
               :pools="report.pools || []"
               :cats="cats"
               :boxes="boxes"
@@ -1177,7 +1221,7 @@ onMounted(async () => {
               </div>
               <div v-if="!alerts.length" class="quiet-alert">
                 <Check :size="19" /><span
-                  >暂无触发阈值的变化。正常基准相容也不能排除单猫异常；仍需持续观察。</span
+                  >{{ analysisReady ? '暂无触发阈值的变化。正常相容也不能排除单猫异常，仍需持续观察。' : '后台统计尚未完成；直接记录的血迹、用力无产出提醒仍即时显示。' }}</span
                 >
               </div>
               <div
@@ -1226,7 +1270,7 @@ onMounted(async () => {
             </section>
           </template>
           <BaselineGuide
-            v-if="tab === 'records'"
+            v-if="tab === 'records' && analysisReady"
             :pools="report.pools || []"
             :cats="cats"
             :boxes="boxes"
@@ -1239,7 +1283,7 @@ onMounted(async () => {
             @record="startBaseline"
             @collect="openModal('batch')"
           />
-          <BatchAnalysis v-if="tab === 'records'" :pools="report.pools || []" :boxes="boxes" :cats="cats" />
+          <BatchAnalysis v-if="tab === 'records'" :joints="report.joint_analyses || []" :job="dataset.analysis_job" :boxes="boxes" :cats="cats" :can-write="canWrite" @verify="startFollowUp" />
           <section
             v-if="['dashboard', 'records'].includes(tab)"
             class="panel records-panel"

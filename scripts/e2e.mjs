@@ -10,6 +10,17 @@ async function request(who,path,method='GET',body,status=200,headers={}) {
  const cookie=res.headers.get('set-cookie');if(cookie)who.cookie=cookie.split(';')[0];return data
 }
 const now=new Date().toISOString()
+async function analyzed(who,path) {
+ const data=await request(who,path+'/data');const deadline=Date.now()+120000
+ while(!data.analysis_job.has_result) {
+  assert.ok(['queued','running'].includes(data.analysis_job.status),JSON.stringify(data.analysis_job))
+  assert.ok(Date.now()<deadline,'background analysis exceeded test budget')
+  await new Promise(resolve=>setTimeout(resolve,25))
+  const status=await request(who,path+'/analysis/'+data.analysis_job.id)
+  data.analysis_job=status.job;if(status.analysis)data.analysis=status.analysis
+ }
+ return data
+}
 const users=[]
 await request(anon,'/me','GET',undefined,401)
 for (const [who,role] of [[a,'owner'],[b,'editor'],[c,'viewer']]){const name=`qa_${role}_${suffix}`;const out=await request(who,'/auth/register','POST',{username:name,password,display_name:`QA ${role}`});who.name=name;users.push(out.user.id)}
@@ -27,7 +38,7 @@ const litter=await request(a,path+'/litters','POST',{name:'QA litter',material:'
 const box=await request(a,path+'/boxes','POST',{name:'QA shared box',location:'QA',litter_id:litter.id,cat_ids:[cat1.id,cat2.id],archived:false})
 const record={kind:'urine',cat_id:null,box_id:box.id,occurred_at:now,formed_at:new Date(new Date(now)-10*60000).toISOString(),integrity:'complete',collection_complete:true,count:1,grams:42,diameter_cm:4.5,looseness:2,moisture:null,shape:'',size:null,body_weight_kg:null,blood:false,straining:false,no_output:false,notes:'Unknown identity test'}
 const r=await request(b,path+'/records','POST',record)
-let data=await request(a,path+'/data');assert.equal(data.analysis.matches.find(m=>m.record_id===r.id).status,'unknown')
+let data=await analyzed(a,path);assert.equal(data.analysis.matches.find(m=>m.record_id===r.id).status,'unknown')
 await request(a,path+'/litters/'+litter.id,'PATCH',{name:'QA changed litter',material:'tofu',wait_minutes:20,notes:'new protocol'})
 await request(b,path+'/records/'+r.id,'PATCH',{...record,cat_id:cat1.id})
 data=await request(a,path+'/data');assert.equal(data.records.find(row=>row.id===r.id).litter_key,r.litter_key);assert.equal(data.records.find(row=>row.id===r.id).litter_name,'QA litter')
@@ -63,19 +74,29 @@ for (const [cat,grams,diameter] of [[cat1,40,4],[cat2,80,7]]) {
  }
 }
 const batch=await request(a,path+'/batches','POST',{items:[[40,4],[40,4],[15,2],[15,2]].map(([grams,diameter_cm])=>({...record,mode:'shared',grams,diameter_cm}))},201)
-await request(a,path+'/batches','POST',{items:[[40,4],[40,4],[15,2],[15,2]].map(([grams,diameter_cm])=>({...record,mode:'shared',grams,diameter_cm}))},201)
+const earlier=new Date(new Date(now)-2*3600000).toISOString()
+await request(a,path+'/batches','POST',{items:[[40,4],[40,4],[15,2],[15,2]].map(([grams,diameter_cm])=>({...record,mode:'shared',grams,diameter_cm,occurred_at:earlier,formed_at:new Date(new Date(earlier)-10*60000).toISOString()}))},201)
 assert.equal(batch.records.length,4);assert.ok(batch.records.every(r=>r.cat_id===null&&r.mode==='shared'&&r.batch_id===batch.batch_id))
-const poolData=await request(a,path+'/data')
+const queued=await request(a,path+'/data');assert.equal(queued.analysis_job.has_result,false,'new snapshot must return before its fit');assert.equal(queued.analysis_job.status,'queued')
+const jobID=queued.analysis_job.id
+assert.equal((await request(a,path+'/data')).analysis_job.id,jobID,'same snapshot must deduplicate work')
+await request(a,`/tables/${foreign.id}/analysis/${jobID}`,'GET',undefined,404)
+const poolData=await analyzed(a,path)
 const poolAlert=poolData.analysis.alerts.find(a=>a.metric==='shared_pool')
 assert.ok(poolAlert,'shared novelty must alarm without attributed samples')
-assert.equal(poolAlert.anchor_cat_id,cat2.id,'difference across whole collection should prioritize changed cat 2')
+assert.ok(poolAlert.anchor_cat_id==null,'healthy observations cannot exclude either cat intermittent changes')
 assert.equal(poolAlert.cat_id,null,'difference suggestion must never rewrite sample identities')
 assert.equal(poolData.analysis.shared_anomalies,4)
-assert.equal(poolAlert.localization,'provisional','abnormal localization remains unvalidated')
+assert.equal(poolAlert.localization,'candidate_set','retain source ambiguity without independent labels')
 const pool=poolData.analysis.pools.find(p=>p.kind==='urine'&&p.box_id===box.id)
-assert.equal(pool.model_version,'time-mixture-v2')
+assert.equal(pool.model_version,'joint-mixture-v3')
 assert.equal(pool.batch_analysis.batches,2)
 assert.ok(pool.profiles.every(f=>f.quality.normal_validation==='assessed'&&f.quality.localization_validation==='unvalidated'))
+const joint=poolData.analysis.joint_analyses[0]
+assert.equal(joint.evaluated,4);assert.equal(joint.collections,2);assert.equal(joint.periods,2)
+assert.ok(joint.candidate_ids.includes(cat1.id)&&joint.candidate_ids.includes(cat2.id))
+assert.ok(joint.follow_ups.length>0);assert.equal(joint.validation,'unvalidated')
+assert.equal((await request(a,path+'/analysis/'+jobID)).job.status,'done')
 await request(a,path+'/records','POST',{...record,formed_at:new Date(Date.now()+60000).toISOString()},400)
 await request(a,path+'/records','POST',{...record,last_cleaning_complete:true},400)
 await request(a,path+'/records','POST',{...record,last_cleaned_at:new Date(new Date(now)-60000).toISOString(),last_cleaning_complete:true},400)
@@ -90,12 +111,15 @@ await request(a,path+'/records','POST',{...record,cat_id:cat2.id,event_id:tagged
 await request(a,path+'/records','POST',{...record,cat_id:cat1.id,event_id:tagged.event_id,formed_at:new Date(new Date(now)-20*60000).toISOString()},400)
 const mixed=await request(a,path+'/batches','POST',{items:[{...record,mode:'shared',grams:999,integrity:'mixed'}]},201)
 assert.equal(mixed.records[0].cat_id,null)
-const mixedPool=(await request(a,path+'/data')).analysis.pools.find(p=>p.kind==='urine'&&p.box_id===box.id)
+await request(a,path+'/analysis/'+jobID,'GET',undefined,404)
+const mixedPool=(await analyzed(a,path)).analysis.pools.find(p=>p.kind==='urine'&&p.box_id===box.id)
 assert.equal(mixedPool.observations.find(o=>o.record_id===mixed.records[0].id).status,'unusable')
 assert.ok(!poolData.analysis.matches.some(m=>batch.records.some(r=>r.id===m.record_id)),'normal shared samples do not require attribution')
 await request(a,path,'PATCH',{name:t.name,description:t.description,visibility:'private'})
 await request(c,path+'/data');await request(a,path+`/members/${users[1]}`,'PATCH',{role:'editor',status:'removed'})
 await request(b,path+'/data','GET',undefined,404);await request(b,path+'/join','POST',undefined,404)
+const accessible=await request(a,path+'/data');await request(b,path+'/analysis/'+accessible.analysis_job.id,'GET',undefined,404)
+const retry=await request(c,path+'/analysis','POST');assert.ok(['queued','running','done'].includes(retry.analysis_job.status))
 await request(a,path+'/records/'+r.id,'DELETE')
 await request(a,'/auth/logout','POST');await request(a,'/me','GET',undefined,401)
-console.log(`PASS: ${checks} HTTP checks; auth, permissions, isolation, snapshots, emergency, baseline quality, time metadata, event consistency, atomic collection and provisional batch localization.`)
+console.log(`PASS: ${checks} HTTP checks; auth, permissions, isolated async jobs, invalidation, emergency, baseline quality, time metadata, event consistency, atomic collections and joint candidate sets.`)

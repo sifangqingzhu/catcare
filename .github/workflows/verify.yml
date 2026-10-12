@@ -12,6 +12,15 @@ jobs:
   timeout-minutes: 20
   steps:
    - uses: actions/checkout@v4
+   - uses: actions/setup-go@v5
+     with:
+      go-version-file: backend/go.mod
+      cache-dependency-path: backend/go.sum
+   - name: Check backend concurrency and static analysis
+     working-directory: backend
+     run: |
+      go test -race ./...
+      go vet ./...
    - name: Initialize local environment
      run: sh scripts/init-env.sh
    - name: Build and start all containers

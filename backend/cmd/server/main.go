@@ -47,7 +47,9 @@ func main() {
 			log.Fatal("演示数据初始化失败")
 		}
 	}
-	srv := &http.Server{Addr: cfg.Address, Handler: api.New(db, cfg), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second}
+	appCtx, stopAnalysis := context.WithCancel(context.Background())
+	defer stopAnalysis()
+	srv := &http.Server{Addr: cfg.Address, Handler: api.NewWithContext(appCtx, db, cfg), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second}
 	go func() {
 		log.Printf("Catcare listening on %s", cfg.Address)
 		if e := srv.ListenAndServe(); e != nil && e != http.ErrServerClosed {
@@ -57,6 +59,7 @@ func main() {
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
 	<-stop
+	stopAnalysis()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	_ = srv.Shutdown(ctx)
