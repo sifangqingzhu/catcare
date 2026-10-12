@@ -1,0 +1,60 @@
+name: catcare
+services:
+ db:
+  image: postgres:17-alpine
+  restart: unless-stopped
+  environment:
+   POSTGRES_DB: ${POSTGRES_DB:-catcare}
+   POSTGRES_USER: ${POSTGRES_USER:-catcare}
+   POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?请运行 scripts/init-env.ps1 生成 .env}
+  volumes:
+   - postgres_data:/var/lib/postgresql/data
+  healthcheck:
+   test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+   interval: 5s
+   timeout: 3s
+   retries: 20
+  networks: [private]
+ api:
+  build: ./backend
+  restart: unless-stopped
+  environment:
+   DATABASE_URL: postgres://${POSTGRES_USER:-catcare}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-catcare}?sslmode=disable
+   SESSION_SECRET: ${SESSION_SECRET:?请运行 scripts/init-env.ps1 生成 .env}
+   APP_ENV: ${APP_ENV:-development}
+   APP_HOST: 0.0.0.0
+   API_PORT: 8080
+   APP_ORIGIN: ${APP_ORIGIN:-http://127.0.0.1:8092}
+   ENABLE_DEMO: ${ENABLE_DEMO:-false}
+   DEMO_PASSWORD: ${DEMO_PASSWORD:-}
+   BOOTSTRAP_USERNAME: ${BOOTSTRAP_USERNAME:-}
+   BOOTSTRAP_PASSWORD: ${BOOTSTRAP_PASSWORD:-}
+   TRUSTED_PROXIES: 172.16.0.0/12,10.0.0.0/8,192.168.0.0/16
+  depends_on:
+   db:
+    condition: service_healthy
+  healthcheck:
+   test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:8080/api/health"]
+   interval: 10s
+   timeout: 3s
+   retries: 10
+  networks: [private]
+ web:
+  build: ./frontend
+  restart: unless-stopped
+  ports:
+   - "${WEB_BIND:-127.0.0.1}:${WEB_PORT:-8092}:80"
+  depends_on:
+   api:
+    condition: service_healthy
+  healthcheck:
+   test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1/api/health"]
+   interval: 15s
+   timeout: 3s
+   retries: 5
+  networks: [private]
+volumes:
+ postgres_data:
+networks:
+ private:
+  driver: bridge

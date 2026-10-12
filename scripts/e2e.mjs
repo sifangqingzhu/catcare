@@ -1,0 +1,58 @@
+import assert from 'node:assert/strict'
+import { randomBytes } from 'node:crypto'
+import { mkdir, writeFile } from 'node:fs/promises'
+const base=process.env.TEST_BASE_URL||'http://127.0.0.1:8092'
+const suffix=randomBytes(5).toString('hex'),password=randomBytes(16).toString('hex')
+const actor=()=>({cookie:''}),a=actor(),b=actor(),c=actor(),anon=actor();let checks=0
+async function request(who,path,method='GET',body,status=200,headers={}) {
+ const res=await fetch(base+'/api'+path,{method,headers:{...headers,...(body?{'Content-Type':'application/json'}:{}),...(who.cookie?{Cookie:who.cookie}:{})},body:body?JSON.stringify(body):undefined})
+ const data=await res.json();assert.equal(res.status,status,`${method} ${path}: ${data.error||'unexpected status'}`);checks++
+ const cookie=res.headers.get('set-cookie');if(cookie)who.cookie=cookie.split(';')[0];return data
+}
+const now=new Date().toISOString()
+const users=[]
+await request(anon,'/me','GET',undefined,401)
+for (const [who,role] of [[a,'owner'],[b,'editor'],[c,'viewer']]){const name=`qa_${role}_${suffix}`;const out=await request(who,'/auth/register','POST',{username:name,password,display_name:`QA ${role}`});who.name=name;users.push(out.user.id)}
+await mkdir('.runtime',{recursive:true});await writeFile('.runtime/qa-users.json',JSON.stringify(users))
+const t=await request(a,'/tables','POST',{name:`QA ${suffix}`,description:'Disposable integration test data',visibility:'private'},201),path=`/tables/${t.id}`
+await request(b,path+'/data','GET',undefined,404)
+await request(a,path,'PATCH',{name:t.name,description:t.description,visibility:'public'})
+assert.equal((await request(b,path+'/data')).role,'public')
+await request(b,path+'/cats','POST',{name:'Forbidden',sex:'unknown',color:'sage'},403)
+await request(b,path+'/join','POST');let ms=await request(a,path+'/members');assert.equal(ms.find(m=>m.username===b.name).status,'pending')
+await request(a,path+`/members/${users[1]}`,'PATCH',{status:'approved',role:'editor'})
+const cat1=await request(a,path+'/cats','POST',{name:'QA one',breed:'',sex:'male',birthday:'',color:'sage',neutered:true,archived:false,notes:''})
+const cat2=await request(b,path+'/cats','POST',{name:'QA two',breed:'',sex:'female',birthday:'',color:'peach',neutered:true,archived:false,notes:''})
+const litter=await request(a,path+'/litters','POST',{name:'QA litter',material:'mixed',wait_minutes:10,notes:'same scale'})
+const box=await request(a,path+'/boxes','POST',{name:'QA shared box',location:'QA',litter_id:litter.id,cat_ids:[cat1.id,cat2.id],archived:false})
+const record={kind:'urine',cat_id:null,box_id:box.id,occurred_at:now,count:1,grams:42,diameter_cm:4.5,looseness:2,moisture:null,shape:'',size:null,body_weight_kg:null,blood:false,straining:false,no_output:false,notes:'Unknown identity test'}
+const r=await request(b,path+'/records','POST',record)
+let data=await request(a,path+'/data');assert.equal(data.analysis.matches.find(m=>m.record_id===r.id).status,'unknown')
+await request(a,path+'/litters/'+litter.id,'PATCH',{name:'QA changed litter',material:'tofu',wait_minutes:20,notes:'new protocol'})
+await request(b,path+'/records/'+r.id,'PATCH',{...record,cat_id:cat1.id})
+data=await request(a,path+'/data');assert.equal(data.records.find(row=>row.id===r.id).litter_key,r.litter_key);assert.equal(data.records.find(row=>row.id===r.id).litter_name,'QA litter')
+const nr=await request(a,path+'/records','POST',record);assert.notEqual(nr.litter_key,r.litter_key)
+await request(a,path+'/records','POST',{...record,grams:-1},400)
+await request(a,path+'/records','POST',{...record,occurred_at:new Date(Date.now()+86400000).toISOString()},400)
+await request(a,path+'/records','POST',{...record,kind:'stool',diameter_cm:null,looseness:null},400)
+await request(a,path+'/records','POST',{...record,kind:'stool',diameter_cm:null,looseness:null,moisture:3,shape:'formed',size:3})
+const emergency=await request(a,path+'/records','POST',{...record,count:0,grams:null,diameter_cm:null,looseness:null,straining:true,no_output:true})
+data=await request(a,path+'/data');assert.ok(data.analysis.alerts.some(a=>a.record_id===emergency.id&&a.level==='urgent'&&a.cat_id===null))
+await request(a,path+'/members','POST',{username:c.name,role:'viewer'})
+await request(c,path+'/data');await request(c,path+'/weights','POST',{cat_id:cat1.id,kg:4.2,occurred_at:now,notes:''},403)
+await request(c,path+'/records/'+r.id,'DELETE',undefined,403)
+await request(c,path,'PATCH',{name:t.name,description:'',visibility:'private'},403)
+const w=await request(b,path+'/weights','POST',{cat_id:cat1.id,kg:4.2,occurred_at:now,notes:''},201)
+await request(b,path+'/weights/'+w.id,'DELETE')
+const foreign=await request(b,'/tables','POST',{name:'QA foreign',description:'Disposable test',visibility:'private'},201)
+const fc=await request(b,`/tables/${foreign.id}/cats`,'POST',{name:'Foreign cat',sex:'unknown',color:'blue'})
+await request(a,path+'/records','POST',{...record,cat_id:fc.id},400)
+await request(a,path+'/boxes','POST',{name:'Invalid cat ref',litter_id:litter.id,cat_ids:[fc.id]},400)
+await request(a,path+`/cats/${fc.id}`,'PATCH',{name:'Illegal edit',sex:'unknown',color:'blue'},404)
+await request(a,path+'/records','POST',record,403,{Origin:'https://other.example'})
+await request(a,path,'PATCH',{name:t.name,description:t.description,visibility:'private'})
+await request(c,path+'/data');await request(a,path+`/members/${users[1]}`,'PATCH',{role:'editor',status:'removed'})
+await request(b,path+'/data','GET',undefined,404);await request(b,path+'/join','POST',undefined,404)
+await request(a,path+'/records/'+r.id,'DELETE')
+await request(a,'/auth/logout','POST');await request(a,'/me','GET',undefined,401)
+console.log(`PASS: ${checks} HTTP checks; auth, private/public permissions, collaboration, cross-table isolation, validation, snapshots, emergency and CRUD.`)

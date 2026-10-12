@@ -1,0 +1,7 @@
+.git
+.env
+.tools
+.runtime
+**/node_modules
+**/dist
+**/*.exe

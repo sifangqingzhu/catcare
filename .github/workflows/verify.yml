@@ -1,0 +1,27 @@
+name: Verify Catcare Docker deployment
+on:
+ push:
+  branches: [main]
+ pull_request:
+ workflow_dispatch:
+permissions:
+ contents: read
+jobs:
+ docker:
+  runs-on: ubuntu-latest
+  timeout-minutes: 20
+  steps:
+   - uses: actions/checkout@v4
+   - name: Initialize local environment
+     run: sh scripts/init-env.sh
+   - name: Build and start all containers
+     run: docker compose up -d --build --wait --wait-timeout 120
+   - name: Test HTTP API against PostgreSQL
+     run: node scripts/e2e.mjs
+   - name: Verify frontend entry and container health
+     run: |
+      curl --fail http://127.0.0.1:8092/ | grep '猫猫手账'
+      docker compose ps
+   - name: Stop disposable CI environment
+     if: always()
+     run: docker compose down -v
