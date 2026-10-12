@@ -145,7 +145,7 @@ func TestAggregateCollectionCannotPretendToBeOneItem(t *testing.T) {
 	r.Count = 4
 	rs = append(rs, r)
 	out := AnalyzePools(rs, nil, bs, ls, now)
-	if sharedAlert(out) != nil || out.SharedAnomalies != 0 {
+	if sharedAlert(out) != nil || out.SharedAnomalies != 0 || out.SharedCount != 4 {
 		t.Fatal("aggregate weight must not be compared with an individual fingerprint")
 	}
 }

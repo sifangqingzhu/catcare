@@ -301,7 +301,7 @@ func AnalyzePools(rs []model.Record, weights []model.Weight, boxes []model.Box, 
 		if r.Mode != "shared" || r.OccurredAt.After(now) || now.Sub(r.OccurredAt) > 7*24*time.Hour {
 			continue
 		}
-		rep.SharedCount++
+		rep.SharedCount += r.Count
 		if now.Sub(r.OccurredAt) > 3*24*time.Hour {
 			continue
 		}
