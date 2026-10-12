@@ -15,14 +15,15 @@ type MetricBaseline struct {
 	Samples int     `json:"samples"`
 }
 type Fingerprint struct {
-	CatID   uint                      `json:"cat_id"`
-	Days    int                       `json:"days"`
-	Samples int                       `json:"samples"`
-	Ready   bool                      `json:"ready"`
-	Start   *time.Time                `json:"start"`
-	End     *time.Time                `json:"end"`
-	Metrics map[string]MetricBaseline `json:"metrics"`
-	Shapes  map[string]int            `json:"shapes"`
+	RecordedDates []string                  `json:"recorded_dates"`
+	CatID         uint                      `json:"cat_id"`
+	Days          int                       `json:"days"`
+	Samples       int                       `json:"samples"`
+	Ready         bool                      `json:"ready"`
+	Start         *time.Time                `json:"start"`
+	End           *time.Time                `json:"end"`
+	Metrics       map[string]MetricBaseline `json:"metrics"`
+	Shapes        map[string]int            `json:"shapes"`
 }
 type PoolObservation struct {
 	RecordID uint    `json:"record_id"`
@@ -90,6 +91,11 @@ func fingerprint(cat uint, kind, key string, rs []model.Record, cutoff time.Time
 		}
 	}
 	f.Days = len(dates)
+	f.RecordedDates = []string{}
+	for key := range dates {
+		f.RecordedDates = append(f.RecordedDates, key)
+	}
+	sort.Strings(f.RecordedDates)
 	for k, vs := range values {
 		if len(vs) >= 6 {
 			m, s := robust(vs, floors[k])
@@ -268,6 +274,11 @@ func differential(observed, abnormal []model.Record, fs []Fingerprint) ([]Suspec
 // collection, including the other healthy-looking items. It never assigns CatID.
 func AnalyzePools(rs []model.Record, weights []model.Weight, boxes []model.Box, litters []model.Litter, now time.Time, locations ...*time.Location) Report {
 	rep := Analyze(rs, weights, now)
+	rep.CalibrationDays = 7
+	rep.CalibrationTimezone = "UTC"
+	if len(locations) > 0 && locations[0] != nil {
+		rep.CalibrationTimezone = locations[0].String()
+	}
 	rep.Pools = []Pool{}
 	type group struct {
 		box       uint

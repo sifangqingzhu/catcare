@@ -37,14 +37,16 @@ type Alert struct {
 	Key          string    `json:"-"`
 }
 type Report struct {
-	Matches         []Match `json:"matches"`
-	Alerts          []Alert `json:"alerts"`
-	Confirmed       int     `json:"confirmed"`
-	Unknown         int     `json:"unknown"`
-	BaselineDays    int     `json:"baseline_days"`
-	Pools           []Pool  `json:"pools"`
-	SharedCount     int     `json:"shared_count"`
-	SharedAnomalies int     `json:"shared_anomalies"`
+	CalibrationDays     int     `json:"calibration_days"`
+	CalibrationTimezone string  `json:"calibration_timezone"`
+	Matches             []Match `json:"matches"`
+	Alerts              []Alert `json:"alerts"`
+	Confirmed           int     `json:"confirmed"`
+	Unknown             int     `json:"unknown"`
+	BaselineDays        int     `json:"baseline_days"`
+	Pools               []Pool  `json:"pools"`
+	SharedCount         int     `json:"shared_count"`
+	SharedAnomalies     int     `json:"shared_anomalies"`
 }
 
 func median(xs []float64) float64 {

@@ -2,8 +2,14 @@
 import { ref, computed } from "vue";
 import { Plus, X, Trash2, Check, LoaderCircle, Layers } from "lucide-vue-next";
 import { api } from "../api";
-const props = defineProps({ tableId: Number, boxes: Array, litters: Array });
-const emit = defineEmits(["close", "saved"]);
+const props = defineProps({
+  tableId: Number,
+  boxes: Array,
+  litters: Array,
+  pools: Array,
+  cats: Array,
+});
+const emit = defineEmits(["close", "saved", "baseline"]);
 const boxId = ref(props.boxes.find((b) => !b.archived)?.id || ""),
   notes = ref(""),
   busy = ref(false),
@@ -33,6 +39,30 @@ const selected = computed(() =>
 const litter = computed(() =>
   props.litters.find((l) => l.id === selected.value?.litter_id),
 );
+const baselineStatus = computed(() => {
+  const box = selected.value,
+    l = litter.value;
+  if (!box || !l) return { ready: false, text: "先选择猫砂盆" };
+  const kinds = [...new Set(items.value.map((item) => item.kind))],
+    summaries = [];
+  let ready = true;
+  for (const id of box.cat_ids)
+    for (const kind of kinds) {
+      const p = (props.pools || [])
+        .find(
+          (p) =>
+            p.box_id === box.id &&
+            p.kind === kind &&
+            p.litter_key === `${l.id}:v${l.version}`,
+        )
+        ?.profiles.find((f) => f.cat_id === id);
+      if (!p?.ready) ready = false;
+      summaries.push(
+        `${props.cats?.find((c) => c.id === id)?.name || "猫咪"} ${kind === "urine" ? "尿团" : "大便"} ${p?.days || 0}/7天`,
+      );
+    }
+  return { ready, text: summaries.join(" · ") };
+});
 const num = (v) => (v === "" ? null : Number(v));
 async function save() {
   busy.value = true;
@@ -108,8 +138,22 @@ async function save() {
         <div class="form-note">
           <Layers :size="17" />
           <p>
-            不需要判断归属。一行记录一个完整尿团或一块完整大便；正常样本与异常样本一起用于差异分析。碎片请先按同一块合并称量。
+            无需判断归属，逐块称量，碎片合并。正常与异常样本共同用于差异分析。
           </p>
+        </div>
+        <div
+          class="collection-baseline-status"
+          :class="{ ready: baselineStatus.ready }"
+        >
+          <div>
+            <strong
+              >7天基准 ·
+              {{ baselineStatus.ready ? "已就绪" : "尚未就绪" }}</strong
+            ><span>{{ baselineStatus.text }}</span>
+          </div>
+          <button type="button" class="text-btn" @click="emit('baseline')">
+            查看基准
+          </button>
         </div>
         <p class="form-hint">
           {{ litter?.name || "未选择猫砂" }} · 等待
@@ -139,7 +183,10 @@ async function save() {
               <Trash2 :size="15" />
             </button>
           </div>
-          <div class="form-grid">
+          <div
+            class="form-grid collection-metrics"
+            :class="item.kind === 'urine' ? 'urine-metrics' : 'stool-metrics'"
+          >
             <label
               >重量（g）<input
                 type="number"
@@ -232,7 +279,7 @@ async function save() {
         ><label
           >本次采集备注<textarea
             v-model="notes"
-            rows="2"
+            rows="1"
             maxlength="500"
             placeholder="例如：今日第一次清理，共发现2团尿、1块大便"
           />

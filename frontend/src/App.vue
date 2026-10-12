@@ -66,6 +66,7 @@ const tables = ref([]),
   inviteName = ref(""),
   inviteRole = ref("editor"),
   publicSearch = ref("");
+const baselineExpanded = ref(false);
 const nav = [
   { id: "dashboard", name: "生活概览", icon: LayoutDashboard },
   { id: "records", name: "屎尿记录", icon: ClipboardList },
@@ -376,10 +377,16 @@ function openModal(type, item) {
     ])
       if (form.value[key] === null) form.value[key] = "";
 }
-function startBaseline() {
+function startBaseline(catId = 0) {
   openModal("record");
+  if (catId) {
+    form.value.box_id =
+      boxes.value.find((b) => !b.archived && b.cat_ids.includes(catId))?.id ||
+      form.value.box_id;
+  }
   form.value.mode = "baseline";
-  form.value.cat_id = selectedCat.value || eligibleCats.value[0]?.id || "";
+  form.value.cat_id =
+    catId || selectedCat.value || eligibleCats.value[0]?.id || "";
   form.value.count = 1;
 }
 function onModeChange() {
@@ -822,6 +829,12 @@ onMounted(async () => {
           >
             <button
               class="btn secondary"
+              @click="baselineExpanded = !baselineExpanded"
+            >
+              7天基准
+            </button>
+            <button
+              class="btn secondary"
               @click="
                 openModal('record');
                 form.mode = 'observed';
@@ -1119,6 +1132,11 @@ onMounted(async () => {
             <BaselineGuide
               :pools="report.pools || []"
               :cats="cats"
+              :boxes="boxes"
+              :litters="litters"
+              :records="records"
+              :timezone="report.calibration_timezone || 'Asia/Tokyo'"
+              :show-details="baselineExpanded"
               :can-write="canWrite"
               @record="startBaseline"
               @collect="openModal('batch')"
@@ -1182,6 +1200,20 @@ onMounted(async () => {
               </p>
             </section>
           </template>
+          <BaselineGuide
+            v-if="tab === 'records'"
+            :pools="report.pools || []"
+            :cats="cats"
+            :boxes="boxes"
+            :litters="litters"
+            :records="records"
+            :timezone="report.calibration_timezone || 'Asia/Tokyo'"
+            :show-details="baselineExpanded"
+            :can-write="canWrite"
+            compact
+            @record="startBaseline"
+            @collect="openModal('batch')"
+          />
           <section
             v-if="['dashboard', 'records'].includes(tab)"
             class="panel records-panel"
@@ -1763,8 +1795,15 @@ onMounted(async () => {
     :table-id="dataset.table.id"
     :boxes="boxes"
     :litters="litters"
+    :pools="report.pools || []"
+    :cats="cats"
     @close="modal = ''"
     @saved="collected"
+    @baseline="
+      modal = '';
+      baselineExpanded = true;
+      go('records');
+    "
   />
   <div
     v-if="modal && modal !== 'batch'"
@@ -2076,11 +2115,15 @@ onMounted(async () => {
                 v-model.number="form.count"
                 type="number"
                 :min="form.no_output ? 0 : 1"
-                max="100"
-                :disabled="form.no_output"
+                :max="form.mode === 'baseline' ? 1 : 100"
+                :disabled="form.no_output || form.mode === 'baseline'"
                 required /></label
             ><label
-              >总重量（g，可选）<input
+              >{{
+                form.mode === "baseline"
+                  ? "重量（g，基准必填）"
+                  : "总重量（g，可选）"
+              }}<input
                 v-model="form.grams"
                 type="number"
                 min="0.1"
