@@ -25,20 +25,6 @@ const currentPools = computed(() =>
     );
   }),
 );
-const dateKey = (time) => {
-  const parts = Object.fromEntries(
-    new Intl.DateTimeFormat("en-CA", {
-      timeZone: props.timezone,
-      year: "numeric",
-      month: "2-digit",
-      day: "2-digit",
-    })
-      .formatToParts(new Date(time))
-      .filter((p) => p.type !== "literal")
-      .map((p) => [p.type, p.value]),
-  );
-  return `${parts.year}-${parts.month}-${parts.day}`;
-};
 const shortDate = (time) =>
   new Intl.DateTimeFormat("zh-CN", {
     timeZone: props.timezone,
@@ -46,15 +32,11 @@ const shortDate = (time) =>
     day: "2-digit",
   }).format(new Date(time));
 const status = (f) =>
-  f.ready
+  f.quality?.state === 'conditions_mixed' ? '采集条件不一致' : f.quality?.state === 'legacy_quality' ? '质量待补齐' : f.ready
     ? "基准可用"
     : !f.samples
       ? "未开始"
-      : new Date(f.end).getTime() <= Date.now()
-        ? f.days < 7
-          ? "缺少采样日"
-          : "量化样本不足"
-        : f.days >= 7
+      : f.days >= 7
           ? "等待7天窗口结束"
           : "采样中";
 const profiles = computed(() => {
@@ -66,30 +48,11 @@ const profiles = computed(() => {
         unique.set(key, { ...f, kind: pool.kind, litter_key: pool.litter_key });
     }
   return [...unique.values()].map((f) => {
-    const samples = (props.records || []).filter(
-      (r) =>
-        r.mode === "baseline" &&
-        r.cat_id === f.cat_id &&
-        r.kind === f.kind &&
-        r.litter_key === f.litter_key &&
-        r.count === 1 &&
-        !r.blood &&
-        !r.straining &&
-        !r.no_output &&
-        f.start &&
-        new Date(r.occurred_at) >= new Date(f.start) &&
-        new Date(r.occurred_at) < new Date(f.end),
-    );
-    const dates = new Set(
-      f.recorded_dates || samples.map((r) => dateKey(r.occurred_at)),
-    );
     const days = Array.from({ length: 7 }, (_, i) => {
-      const time = f.start
-        ? new Date(f.start).getTime() + i * 86400000 + 12 * 3600000
-        : null;
+      const recorded = f.recorded_dates?.[i];
       return {
-        label: time ? shortDate(time) : `第${i + 1}天`,
-        recorded: time && dates.has(dateKey(time)),
+        label: recorded ? recorded.slice(5).replace('-', '/') : `第${i + 1}天`,
+        recorded: !!recorded,
       };
     });
     return {
@@ -123,14 +86,9 @@ const progress = computed(() =>
         cat,
         urine: summarize(urine),
         stool: summarize(stool),
-        ready: fs.length > 0 && fs.every((f) => f.ready),
+        ready: fs.length > 0 && fs.every((f) => f.ready && f.quality?.state === 'ready'),
         started: fs.some((f) => f.samples > 0),
-        incomplete: fs.some(
-          (f) =>
-            f.samples > 0 &&
-            !f.ready &&
-            new Date(f.end).getTime() <= Date.now(),
-        ),
+        incomplete: fs.some(f => ['legacy_quality','conditions_mixed'].includes(f.quality?.state)),
       };
     }),
 );
@@ -219,7 +177,7 @@ const metric = (f, k, unit) =>
     <details class="baseline-details" :open="showDetails">
       <summary>查看7天覆盖情况与基准数值</summary>
       <p class="baseline-rule">
-        从第一条隔离样本所在日期开始，保留最初7天；需要完整覆盖和足够的量化样本才能就绪。更换猫砂版本后重新建立。共享记录不进入基准。
+        累计7个独立采样日后冻结该版本；同份样本重复称量只计一个事件。7天完成不代表定位已验证。更换猫砂配置或提高基准版本后重新采样，共享记录不训练。
       </p>
       <div class="baseline-detail-tabs">
         <button
@@ -241,8 +199,8 @@ const metric = (f, k, unit) =>
           <strong
             >{{ catName(f.cat_id) }} ·
             {{ f.kind === "urine" ? "尿团" : "大便" }}</strong
-          ><span>{{ configName(f.litter_key) }}</span
-          ><span class="pill" :class="f.ready ? 'sage' : 'amber'">{{
+          ><span>{{ configName(f.litter_key) }} · 基准 v{{ f.version || 1 }}</span
+          ><span class="pill" :class="f.ready && f.quality?.state === 'ready' ? 'sage' : 'amber'">{{
             f.status
           }}</span>
         </div>
@@ -270,6 +228,14 @@ const metric = (f, k, unit) =>
         <p v-if="!f.ready && f.samples" class="baseline-rule">
           窗口：{{ f.range }}；目前 {{ f.days }} 个采样日，尚未满足全部条件。
         </p>
+        <div class="baseline-quality">
+          <span>正常可分性 <b>{{ ({unassessed:'待评估',overlap:'特征重叠',separable:'可区分'})[f.quality?.separation] || '待评估' }}</b></span>
+          <span>时间覆盖 <b>{{ f.time_model?.known_events >= 3 ? `${f.time_model.min_hours.toFixed(1)}—${f.time_model.max_hours.toFixed(1)}小时` : '形成时间不足' }}</b></span>
+          <span>老化曲线 <b>{{ f.time_model?.status === 'paired' ? `实测 · ${f.time_model.paired_events}个事件` : '尚未实测' }}</b></span>
+          <span>异常定位 <b>未验证</b></span>
+          <span v-if="f.quality?.normal_validation === 'assessed'">按日留出验证 <b>{{ f.quality.validation_events }}份 / 给候选{{ f.quality.validation_coverage }}份 / 错认{{ f.quality.validation_errors }}份</b></span>
+        </div>
+        <p v-for="reason in (f.quality?.reasons || [])" :key="reason" class="baseline-rule">{{ reason }}</p>
       </article>
       <p class="baseline-rule">
         典型数值取隔离样本的中位数，波动尺度采用

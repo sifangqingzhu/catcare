@@ -2,6 +2,8 @@
 import { ref, computed } from "vue";
 import { Plus, X, Trash2, Check, LoaderCircle, Layers } from "lucide-vue-next";
 import { api } from "../api";
+import SamplingDetails from './SamplingDetails.vue';
+import { samplingDefaults, samplingPayload } from '../sampling';
 const props = defineProps({
   tableId: Number,
   boxes: Array,
@@ -22,6 +24,7 @@ const occurredAt = ref(
 );
 let sequence = 0;
 const newItem = () => ({
+  ...samplingDefaults(),
   key: ++sequence,
   kind: "urine",
   grams: "",
@@ -33,6 +36,7 @@ const newItem = () => ({
   blood: false,
 });
 const items = ref([newItem()]);
+const conditions = ref(samplingDefaults());
 const selected = computed(() =>
   props.boxes.find((b) => b.id === Number(boxId.value)),
 );
@@ -56,7 +60,7 @@ const baselineStatus = computed(() => {
             p.litter_key === `${l.id}:v${l.version}`,
         )
         ?.profiles.find((f) => f.cat_id === id);
-      if (!p?.ready) ready = false;
+      if (!p?.ready || p.quality?.state !== 'ready') ready = false;
       summaries.push(
         `${props.cats?.find((c) => c.id === id)?.name || "猫咪"} ${kind === "urine" ? "尿团" : "大便"} ${p?.days || 0}/7天`,
       );
@@ -69,6 +73,7 @@ async function save() {
   error.value = "";
   try {
     const records = items.value.map((r) => ({
+      ...samplingPayload({ ...r, last_cleaned_at: conditions.value.last_cleaned_at, last_cleaning_complete: conditions.value.last_cleaning_complete, collection_complete: conditions.value.collection_complete, litter_depth_cm: conditions.value.litter_depth_cm, mode: 'shared' }),
       mode: "shared",
       kind: r.kind,
       cat_id: null,
@@ -148,7 +153,7 @@ async function save() {
           <div>
             <strong
               >7天基准 ·
-              {{ baselineStatus.ready ? "已就绪" : "尚未就绪" }}</strong
+              {{ baselineStatus.ready ? "已采满 · 定位待验证" : "尚未就绪" }}</strong
             ><span>{{ baselineStatus.text }}</span>
           </div>
           <button type="button" class="text-btn" @click="emit('baseline')">
@@ -160,6 +165,16 @@ async function save() {
           {{ litter?.wait_minutes ?? "—" }} 分钟称量 · 本次
           {{ items.length }} 块
         </p>
+        <details class="sampling-details collection-conditions">
+          <summary>清理间隔与采集条件</summary>
+          <div class="form-grid sampling-grid">
+            <label>上次清理时间<input type="datetime-local" v-model="conditions.last_cleaned_at" @change="!conditions.last_cleaned_at && (conditions.last_cleaning_complete = false)" /></label>
+            <label>铺砂厚度（cm）<input type="number" min="0.1" max="30" step="0.1" v-model="conditions.litter_depth_cm" /></label>
+            <label class="check-label"><input type="checkbox" v-model="conditions.last_cleaning_complete" :disabled="!conditions.last_cleaned_at" />上次已彻底清理</label>
+            <label class="check-label"><input type="checkbox" v-model="conditions.collection_complete" />本次已完整采集</label>
+          </div>
+          <p class="form-hint">确认上次彻底清理，才能限定本批样本的存放时间。不完整采集会限制单猫定位。</p>
+        </details>
         <article
           class="collection-item"
           v-for="(item, index) in items"
@@ -265,9 +280,8 @@ async function save() {
               ></template
             >
           </div>
-          <label class="check-label"
-            ><input type="checkbox" v-model="item.blood" />这块发现血迹</label
-          >
+          <div class="collection-flags"><label>完整性<select v-model="item.integrity"><option value="complete">完整单块</option><option value="fragmented">碎裂</option><option value="adhered">疑似粘连</option><option value="mixed">混合</option><option value="unknown">无法判断</option></select></label><label class="check-label"><input type="checkbox" v-model="item.blood" />发现血迹</label></div>
+          <SamplingDetails :sample="item" />
         </article>
         <button
           type="button"

@@ -39,6 +39,9 @@ import CatFace from "./components/CatFace.vue";
 import WeightChart from "./components/WeightChart.vue";
 import SharedCollection from "./components/SharedCollection.vue";
 import BaselineGuide from "./components/BaselineGuide.vue";
+import SamplingDetails from './components/SamplingDetails.vue';
+import BatchAnalysis from './components/BatchAnalysis.vue';
+import { samplingDefaults, samplingPayload } from './sampling';
 
 const user = ref(null),
   isDemo = ref(false),
@@ -201,17 +204,21 @@ const materialNames = {
   paper: "纸砂",
   other: "其他",
 };
-const poolStatus = (r) =>
+const poolObservation = (r) =>
   (report.value.pools || [])
     .flatMap((p) => p.observations)
-    .find((o) => o.record_id === r.id)?.status;
+    .find((o) => o.record_id === r.id);
+const poolStatus = r => poolObservation(r)?.status;
 const statusText = (r) =>
   r.mode === "baseline"
     ? "7天隔离基线"
     : r.mode === "shared"
       ? {
           anomaly: "异常样本",
-          within_baseline: "落在正常基线簇",
+          within_baseline: "与某正常基准相容",
+          time_unresolved: '存放时间未解决',
+          measurement_change: '测量变化 · 待复测',
+          unusable: '完整性或测量不足',
           need_baseline: "尚缺完整基线",
           aggregate_only: "仅汇总，未逐块",
           insufficient_metrics: "缺少可比较维度",
@@ -334,6 +341,7 @@ function openModal(type, item) {
       notes: "",
     },
     record: {
+      ...samplingDefaults(),
       mode: "shared",
       kind: "urine",
       cat_id: "",
@@ -363,6 +371,8 @@ function openModal(type, item) {
         ...item,
         cat_ids: item.cat_ids ? [...item.cat_ids] : undefined,
         occurred_at: item.occurred_at ? dateInput(item.occurred_at) : undefined,
+        formed_at: item.formed_at ? dateInput(item.formed_at) : '',
+        last_cleaned_at: item.last_cleaned_at ? dateInput(item.last_cleaned_at) : '',
       }
     : { ...defaults[type] };
   if (item && type === "record")
@@ -374,6 +384,7 @@ function openModal(type, item) {
       "size",
       "body_weight_kg",
       "cat_id",
+      "length_cm", "width_cm", "thickness_cm", "litter_depth_cm",
     ])
       if (form.value[key] === null) form.value[key] = "";
 }
@@ -385,17 +396,29 @@ function startBaseline(catId = 0) {
       form.value.box_id;
   }
   form.value.mode = "baseline";
+  form.value.identity_method = 'isolated';
   form.value.cat_id =
     catId || selectedCat.value || eligibleCats.value[0]?.id || "";
   form.value.count = 1;
+  setBaselineVersion();
+}
+function setBaselineVersion() {
+  const f = form.value;
+  if (f.mode !== 'baseline' || f.id) return;
+  f.baseline_version = report.value.pools?.find(p => p.box_id === Number(f.box_id) && p.kind === f.kind)?.profiles.find(p => p.cat_id === Number(f.cat_id))?.version || 1;
 }
 function onModeChange() {
   if (form.value.mode === "shared") {
     form.value.cat_id = "";
+    form.value.identity_method = 'unknown';
   } else if (form.value.mode === "baseline") {
     form.value.cat_id = eligibleCats.value[0]?.id || "";
     form.value.count = 1;
     form.value.no_output = false;
+    form.value.identity_method = 'isolated';
+    setBaselineVersion();
+  } else {
+    form.value.identity_method = 'witnessed';
   }
 }
 async function collected() {
@@ -414,6 +437,7 @@ function onNoOutput() {
   if (form.value.no_output) {
     form.value.grams = "";
     form.value.diameter_cm = "";
+    form.value.length_cm = ''; form.value.width_cm = ''; form.value.thickness_cm = ''; form.value.formed_at = '';
   }
 }
 const num = (v) =>
@@ -478,6 +502,7 @@ async function save() {
     }
     if (type === "record") {
       body = {
+        ...samplingPayload(f),
         mode: f.mode || "observed",
         kind: f.kind,
         cat_id: num(f.cat_id),
@@ -1088,7 +1113,7 @@ onMounted(async () => {
                 <div class="shared-number">
                   <strong>{{ report.shared_anomalies || 0 }}</strong
                   ><span
-                    >块共享样本出现异常<small
+                    >块共享样本有变化线索<small
                       >先检测异常，再缩小排查范围</small
                     ></span
                   >
@@ -1152,7 +1177,7 @@ onMounted(async () => {
               </div>
               <div v-if="!alerts.length" class="quiet-alert">
                 <Check :size="19" /><span
-                  >暂无触发阈值的变化。样本不足时仍需继续记录与观察。</span
+                  >暂无触发阈值的变化。正常基准相容也不能排除单猫异常；仍需持续观察。</span
                 >
               </div>
               <div
@@ -1179,8 +1204,8 @@ onMounted(async () => {
                       v-for="s in a.suspects"
                       :key="s.cat_id"
                       :title="s.reason"
-                      >{{ catName(s.cat_id) }} · 差异支持 {{ s.score }}分</span
-                    ><small>支持分是模型比较分，不是患病概率。</small>
+                      >{{ catName(s.cat_id) }} · 第{{ s.rank || 1 }}候选 · 证据改善 {{ s.gain }}</span
+                    ><small>未校准的模型证据；异常定位未验证，不是患病概率。</small>
                   </div>
                 </div>
                 <button
@@ -1214,6 +1239,7 @@ onMounted(async () => {
             @record="startBaseline"
             @collect="openModal('batch')"
           />
+          <BatchAnalysis v-if="tab === 'records'" :pools="report.pools || []" :boxes="boxes" :cats="cats" />
           <section
             v-if="['dashboard', 'records'].includes(tab)"
             class="panel records-panel"
@@ -1306,8 +1332,9 @@ onMounted(async () => {
                           r.mode === "shared" ? "共享盆样本" : catName(r.cat_id)
                         }}</span
                       ><small
+                        :title="poolObservation(r)?.reason"
                         :class="{
-                          'anomaly-label': poolStatus(r) === 'anomaly',
+                          'anomaly-label': ['anomaly','measurement_change'].includes(poolStatus(r)),
                         }"
                         >{{ statusText(r)
                         }}{{ r.batch_id ? " · 同批次" : "" }}</small
@@ -1344,6 +1371,7 @@ onMounted(async () => {
                               .filter(Boolean)
                               .join(" · ")
                       }}</small>
+                      <small v-if="!r.no_output">{{ ({complete:'完整',fragmented:'碎裂',adhered:'疑似粘连',mixed:'混合',unknown:'完整性未知'})[r.integrity] || '完整性未知' }}{{ r.formed_at ? ` · 存放${Math.max(0,(new Date(r.occurred_at)-new Date(r.formed_at))/3600000).toFixed(1)}小时` : ' · 形成时间未知' }}</small>
                     </td>
                     <td>
                       {{ boxName(r.box_id)
@@ -2048,13 +2076,13 @@ onMounted(async () => {
             <button
               type="button"
               :class="{ active: form.kind === 'urine' }"
-              @click="form.kind = 'urine'"
+              @click="form.kind = 'urine'; setBaselineVersion()"
             >
               <Droplets :size="17" />尿团</button
             ><button
               type="button"
               :class="{ active: form.kind === 'stool' }"
-              @click="form.kind = 'stool'"
+              @click="form.kind = 'stool'; setBaselineVersion()"
             >
               <ClipboardList :size="17" />大便
             </button>
@@ -2078,13 +2106,14 @@ onMounted(async () => {
                 </option>
               </select></label
             ><label
-              >观察时间<input
+              >采集 / 观察时间<input
                 type="datetime-local"
                 v-model="form.occurred_at"
                 required /></label
             ><label class="full" v-if="form.mode !== 'shared'"
               >猫咪归属<select
                 v-model="form.cat_id"
+                @change="setBaselineVersion"
                 :required="form.mode === 'baseline'"
               >
                 <option value="">不确定 / 混合收集</option>
@@ -2193,6 +2222,8 @@ onMounted(async () => {
               ><input v-model="form.blood" type="checkbox" />发现血迹</label
             >
           </div>
+          <label v-if="!form.no_output">样本完整性<select v-model="form.integrity"><option value="complete">完整单块</option><option value="fragmented">碎裂</option><option value="adhered">疑似粘连</option><option value="mixed">混合</option><option value="unknown">无法判断 / 旧记录未确认</option></select></label>
+          <SamplingDetails v-if="!form.no_output" :sample="form" :baseline="form.mode === 'baseline'" cleaning />
           <div
             class="error"
             v-if="form.kind === 'urine' && form.straining && form.no_output"

@@ -643,23 +643,35 @@ func (s *Server) saveBox(c *gin.Context) {
 }
 
 type recordInput struct {
-	Kind         string    `json:"kind" binding:"required,oneof=urine stool"`
-	Mode         string    `json:"mode" binding:"omitempty,oneof=baseline shared observed"`
-	CatID        *uint     `json:"cat_id"`
-	BoxID        uint      `json:"box_id" binding:"required"`
-	OccurredAt   time.Time `json:"occurred_at" binding:"required"`
-	Count        int       `json:"count" binding:"min=0,max=100"`
-	Grams        *float64  `json:"grams" binding:"omitempty,gt=0,lte=2000"`
-	DiameterCM   *float64  `json:"diameter_cm" binding:"omitempty,gt=0,lte=50"`
-	Looseness    *int      `json:"looseness" binding:"omitempty,min=1,max=5"`
-	Moisture     *int      `json:"moisture" binding:"omitempty,min=1,max=5"`
-	Shape        string    `json:"shape" binding:"omitempty,oneof=pellet formed soft paste watery"`
-	Size         *int      `json:"size" binding:"omitempty,min=1,max=5"`
-	BodyWeightKG *float64  `json:"body_weight_kg" binding:"omitempty,gt=0,lte=30"`
-	Blood        bool      `json:"blood"`
-	Straining    bool      `json:"straining"`
-	NoOutput     bool      `json:"no_output"`
-	Notes        string    `json:"notes" binding:"max=500"`
+	Kind                 string     `json:"kind" binding:"required,oneof=urine stool"`
+	Mode                 string     `json:"mode" binding:"omitempty,oneof=baseline shared observed"`
+	CatID                *uint      `json:"cat_id"`
+	BoxID                uint       `json:"box_id" binding:"required"`
+	OccurredAt           time.Time  `json:"occurred_at" binding:"required"`
+	FormedAt             *time.Time `json:"formed_at"`
+	LastCleanedAt        *time.Time `json:"last_cleaned_at"`
+	LastCleaningComplete bool       `json:"last_cleaning_complete"`
+	CollectionComplete   bool       `json:"collection_complete"`
+	Integrity            string     `json:"integrity" binding:"omitempty,oneof=complete fragmented adhered mixed unknown"`
+	EventID              string     `json:"event_id" binding:"max=64"`
+	IdentityMethod       string     `json:"identity_method" binding:"omitempty,oneof=unknown isolated witnessed device manual"`
+	BaselineVersion      int        `json:"baseline_version" binding:"min=0,max=10000"`
+	LengthCM             *float64   `json:"length_cm" binding:"omitempty,gt=0,lte=50"`
+	WidthCM              *float64   `json:"width_cm" binding:"omitempty,gt=0,lte=50"`
+	ThicknessCM          *float64   `json:"thickness_cm" binding:"omitempty,gt=0,lte=50"`
+	LitterDepthCM        *float64   `json:"litter_depth_cm" binding:"omitempty,gt=0,lte=30"`
+	Count                int        `json:"count" binding:"min=0,max=100"`
+	Grams                *float64   `json:"grams" binding:"omitempty,gt=0,lte=2000"`
+	DiameterCM           *float64   `json:"diameter_cm" binding:"omitempty,gt=0,lte=50"`
+	Looseness            *int       `json:"looseness" binding:"omitempty,min=1,max=5"`
+	Moisture             *int       `json:"moisture" binding:"omitempty,min=1,max=5"`
+	Shape                string     `json:"shape" binding:"omitempty,oneof=pellet formed soft paste watery"`
+	Size                 *int       `json:"size" binding:"omitempty,min=1,max=5"`
+	BodyWeightKG         *float64   `json:"body_weight_kg" binding:"omitempty,gt=0,lte=30"`
+	Blood                bool       `json:"blood"`
+	Straining            bool       `json:"straining"`
+	NoOutput             bool       `json:"no_output"`
+	Notes                string     `json:"notes" binding:"max=500"`
 }
 
 func contains(xs []uint, x uint) bool {
@@ -702,6 +714,69 @@ func (s *Server) populateRecord(c *gin.Context, db *gorm.DB, r *model.Record, in
 	}
 	if in.Mode == "" {
 		in.Mode = "observed"
+	}
+	if in.Integrity == "" {
+		in.Integrity = "unknown"
+	}
+	if in.BaselineVersion == 0 {
+		in.BaselineVersion = 1
+	}
+	if in.IdentityMethod == "" {
+		in.IdentityMethod = "unknown"
+		if in.Mode == "baseline" {
+			in.IdentityMethod = "isolated"
+		} else if in.CatID != nil {
+			in.IdentityMethod = "manual"
+		}
+	}
+	if in.FormedAt != nil && (!validDate(c, *in.FormedAt) || in.FormedAt.After(in.OccurredAt)) {
+		if !c.IsAborted() {
+			fail(c, 400, "形成时间不能晚于采集时间")
+		}
+		return false
+	}
+	if in.LastCleanedAt != nil && (!validDate(c, *in.LastCleanedAt) || !in.LastCleanedAt.Before(in.OccurredAt)) {
+		if !c.IsAborted() {
+			fail(c, 400, "上次清理时间须早于采集时间")
+		}
+		return false
+	}
+	if in.LastCleaningComplete && in.LastCleanedAt == nil {
+		fail(c, 400, "确认上次彻底清理须填写清理时间")
+		return false
+	}
+	if in.LastCleaningComplete && in.FormedAt != nil && in.FormedAt.Before(*in.LastCleanedAt) {
+		fail(c, 400, "样本形成时间不能早于上次彻底清理")
+		return false
+	}
+	if in.Mode == "baseline" && (in.IdentityMethod != "isolated" && in.IdentityMethod != "witnessed" && in.IdentityMethod != "device" || in.Integrity != "complete" && in.Integrity != "unknown") {
+		fail(c, 400, "基准只接受独立确认身份的完整样本；碎裂、粘连和混合样本不能训练")
+		return false
+	}
+	if in.Mode == "shared" && in.IdentityMethod != "unknown" {
+		fail(c, 400, "共享样本身份须保持未知")
+		return false
+	}
+	if in.NoOutput && (in.LengthCM != nil || in.WidthCM != nil || in.ThicknessCM != nil || in.FormedAt != nil) {
+		fail(c, 400, "无产出记录不能填写样本尺寸或形成时间")
+		return false
+	}
+	if in.EventID != "" {
+		var previous []model.Record
+		if db.Where("table_id = ? AND event_id = ? AND id <> ?", tid(c), strings.TrimSpace(in.EventID), r.ID).Find(&previous).Error != nil {
+			fail(c, 500, "事件校验失败")
+			return false
+		}
+		for _, p := range previous {
+			if p.FormedAt != nil && in.FormedAt != nil && !p.FormedAt.Equal(*in.FormedAt) {
+				fail(c, 400, "同一事件的形成时间须一致")
+				return false
+			}
+			if p.Kind != in.Kind || p.CatID != nil && in.CatID != nil && *p.CatID != *in.CatID {
+				fail(c, 400, "同一原始事件不能对应不同猫咪或不同排泄类型")
+				return false
+			}
+		}
 	}
 	if in.Mode == "shared" && in.CatID != nil {
 		fail(c, 400, "共享采集不需要指定猫咪，请清空归属")
@@ -769,6 +844,18 @@ func (s *Server) populateRecord(c *gin.Context, db *gorm.DB, r *model.Record, in
 	r.CatID = in.CatID
 	r.BoxID = in.BoxID
 	r.OccurredAt = in.OccurredAt
+	r.FormedAt = in.FormedAt
+	r.LastCleanedAt = in.LastCleanedAt
+	r.LastCleaningComplete = in.LastCleaningComplete
+	r.CollectionComplete = in.CollectionComplete
+	r.Integrity = in.Integrity
+	r.EventID = strings.TrimSpace(in.EventID)
+	r.IdentityMethod = in.IdentityMethod
+	r.BaselineVersion = in.BaselineVersion
+	r.LengthCM = in.LengthCM
+	r.WidthCM = in.WidthCM
+	r.ThicknessCM = in.ThicknessCM
+	r.LitterDepthCM = in.LitterDepthCM
 	r.Count = in.Count
 	r.Grams = in.Grams
 	r.DiameterCM = in.DiameterCM
@@ -804,6 +891,22 @@ func (s *Server) saveBatch(c *gin.Context) {
 			if item.Mode != "shared" || item.CatID != nil || item.Count != 1 || item.NoOutput || item.BoxID != in.Items[0].BoxID || !item.OccurredAt.Equal(in.Items[0].OccurredAt) {
 				fail(c, 400, "一次共享采集须为同一盆、同一时间的逐块记录，不指定猫咪")
 				return invalid
+			}
+			first := in.Items[0]
+			equalTime := func(a, b *time.Time) bool { return a == nil && b == nil || a != nil && b != nil && a.Equal(*b) }
+			if !equalTime(item.LastCleanedAt, first.LastCleanedAt) || item.LastCleaningComplete != first.LastCleaningComplete || item.CollectionComplete != first.CollectionComplete || (item.LitterDepthCM == nil) != (first.LitterDepthCM == nil) || item.LitterDepthCM != nil && *item.LitterDepthCM != *first.LitterDepthCM {
+				fail(c, 400, "同一批次的清理时间、完整清理和铺砂厚度须一致")
+				return invalid
+			}
+			for _, p := range items {
+				if item.EventID != "" && p.EventID == strings.TrimSpace(item.EventID) && p.FormedAt != nil && item.FormedAt != nil && !p.FormedAt.Equal(*item.FormedAt) {
+					fail(c, 400, "同一事件的形成时间须一致")
+					return invalid
+				}
+				if item.EventID != "" && p.EventID == strings.TrimSpace(item.EventID) && p.Kind != item.Kind {
+					fail(c, 400, "同一事件不能混用尿团和大便类型")
+					return invalid
+				}
 			}
 			r := model.Record{BatchID: batchID}
 			if !s.populateRecord(c, tx, &r, item, false) {

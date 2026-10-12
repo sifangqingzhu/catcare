@@ -22,6 +22,11 @@ func sharedFixture(overlapping bool) ([]model.Record, []model.Box, []model.Litte
 			}
 			r := sample(cat*100+uint(day), cat, now.AddDate(0, 0, day-12), g)
 			r.Mode = "baseline"
+			r.Integrity = "complete"
+			r.IdentityMethod = "isolated"
+			r.BaselineVersion = 1
+			formed := r.OccurredAt.Add(-10 * time.Minute)
+			r.FormedAt = &formed
 			r.DiameterCM = p(d)
 			r.BoxID = 10 + cat
 			rs = append(rs, r)
@@ -35,6 +40,9 @@ func sharedItem(id uint, now time.Time, g, d float64) model.Record {
 	r.CatID = nil
 	r.DiameterCM = p(d)
 	r.BatchID = "collection"
+	r.Integrity = "complete"
+	formed := r.OccurredAt.Add(-10 * time.Minute)
+	r.FormedAt = &formed
 	return r
 }
 func sharedAlert(r Report) *Alert {
@@ -58,13 +66,13 @@ func TestSharedNormalNeedsNoIdentity(t *testing.T) {
 		}
 	}
 }
-func TestDifferentialAnchorsChangedCatWithoutAssigningItems(t *testing.T) {
+func TestDifferentialRanksChangedCatWithoutAssigningItems(t *testing.T) {
 	rs, bs, ls, now := sharedFixture(false)
 	rs = append(rs, sharedItem(901, now, 40, 4), sharedItem(902, now, 40, 4), sharedItem(903, now, 15, 2), sharedItem(904, now, 15, 2))
 	r := AnalyzePools(rs, nil, bs, ls, now)
 	a := sharedAlert(r)
-	if a == nil || a.AnchorCatID == nil || *a.AnchorCatID != 2 || a.Localization != "supported" || a.CatID != nil {
-		t.Fatalf("whole-mixture difference should prioritize cat 2, preserving no attribution: %+v", a)
+	if a == nil || len(a.Suspects) == 0 || a.Suspects[0].CatID != 2 || a.AnchorCatID != nil || a.CatID != nil {
+		t.Fatalf("one batch may rank but must not claim single-cat localization: %+v", a)
 	}
 	if r.SharedAnomalies != 2 {
 		t.Fatal("two novel items should alarm")
